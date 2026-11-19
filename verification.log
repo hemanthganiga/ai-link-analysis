@@ -1,0 +1,24 @@
+Verification run: 2026-11-19
+Python: 3.12.7
+
+Command:
+  python -m pytest -q
+Result:
+  37 passed, 1 warning in 1.23s
+  Warning: StarletteDeprecationWarning from the installed Starlette TestClient integration.
+
+Command:
+  python -m compileall -q app tests
+Result:
+  Exit code 0
+
+Local Uvicorn smoke test:
+  GET /                         200 (status=ok)
+  GET /health                   200 (status=healthy)
+  GET /docs                     200
+  POST /link-analysis with a private loopback URL
+                                422 (blocked by request validation)
+
+No live LLM request was made. No API key was configured. The local outbound
+website-fetch attempt could not complete because direct TLS verification in the
+workspace failed with CERTIFICATE_VERIFY_FAILED; see the README limitations.
