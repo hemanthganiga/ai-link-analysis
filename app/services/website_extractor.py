@@ -257,17 +257,39 @@ class WebsiteExtractor:
         if platform == "youtube":
             oembed_url = "https://www.youtube.com/oembed?url=" + url + "&format=json"
             await validate_resolved_url(oembed_url)
+            data: dict[str, Any] = {}
             async with httpx.AsyncClient(transport=transport, timeout=timeout, trust_env=False) as client:
                 try:
                     response = await client.get(oembed_url, headers=headers)
                     response.raise_for_status()
                     data = response.json()
-                except httpx.TimeoutException as exc:
-                    raise WebsiteTimeoutError("YouTube metadata request timed out.") from exc
-                except httpx.HTTPStatusError as exc:
-                    raise WebsiteHTTPError(f"YouTube returned HTTP {exc.response.status_code}.") from exc
-                except (httpx.HTTPError, json.JSONDecodeError, ValueError) as exc:
-                    raise WebsiteHTTPError("YouTube public metadata could not be reached.") from exc
+                except httpx.TimeoutException:
+                    data = {}
+                except httpx.HTTPStatusError:
+                    data = {}
+                except (httpx.HTTPError, json.JSONDecodeError, ValueError):
+                    data = {}
+
+                if not data:
+                    try:
+                        page = await client.get(url, headers=headers, follow_redirects=True)
+                        if page.status_code >= 400:
+                            raise WebsiteHTTPError(f"YouTube returned HTTP {page.status_code}.")
+                        soup = BeautifulSoup(page.content, "html.parser")
+                        public_metadata = _social_metadata(soup)
+                        title = public_metadata.get("title", "")
+                        description = public_metadata.get("description", "")
+                        if title:
+                            data = {
+                                "title": title,
+                                "author_name": title,
+                                "thumbnail_url": public_metadata.get("image_url", ""),
+                                "description": description,
+                            }
+                    except httpx.TimeoutException as exc:
+                        raise WebsiteTimeoutError("YouTube metadata request timed out.") from exc
+                    except httpx.HTTPError as exc:
+                        raise WebsiteHTTPError("YouTube public metadata could not be reached.") from exc
             title = _clean_text(str(data.get("title", "")))
             author = _clean_text(str(data.get("author_name", "")))
             if not title:

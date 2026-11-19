@@ -60,6 +60,27 @@ async def test_instagram_login_wall_is_reported_as_limited() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_youtube_channel_falls_back_to_public_html_metadata() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if "oembed" in str(request.url):
+            return httpx.Response(404)
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            content=b"<html><head><meta property='og:title' content='YouTube'><meta property='og:description' content='Official YouTube channel'></head></html>",
+        )
+
+    extractor = WebsiteExtractor(transport=httpx.MockTransport(handler))
+    with patch("app.services.website_extractor.validate_resolved_url", new=AsyncMock(return_value=("youtube.com", 443, ["142.250.1.1"]))):
+        result = await extractor.extract("https://www.youtube.com/@YouTube")
+
+    assert result.platform == "youtube"
+    assert result.title == "YouTube"
+    assert result.source == "youtube_oembed"
+
+
+@pytest.mark.asyncio
 async def test_instagram_apify_fallback_is_used_when_configured() -> None:
     html_transport = httpx.MockTransport(
         lambda _: httpx.Response(
