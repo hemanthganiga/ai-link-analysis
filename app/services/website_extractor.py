@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ipaddress
+import json
+import re
 import ssl
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -68,7 +70,7 @@ class EmptyWebsiteContentError(WebsiteFetchError):
 
 @dataclass(frozen=True)
 class WebsiteContent:
-    """Structured content extracted from the submitted landing page."""
+    """Normalized content extracted from a website or public social profile."""
 
     url: str
     title: str
@@ -77,10 +79,22 @@ class WebsiteContent:
     paragraphs: list[str] = field(default_factory=list)
     relevant_links: list[dict[str, str]] = field(default_factory=list)
     service_descriptions: list[str] = field(default_factory=list)
+    platform: str = "website"
+    content_type: str = "page"
+    extraction_status: str = "success"
+    source: str = "public_html"
+    limitations: list[str] = field(default_factory=list)
+    metadata: dict[str, str] = field(default_factory=dict)
 
     def to_prompt_text(self, max_chars: int) -> str:
         """Render only bounded, relevant source content for the analysis prompt."""
         sections = [
+            f"Platform: {self.platform}",
+            f"Content type: {self.content_type}",
+            f"Extraction status: {self.extraction_status}",
+            f"Source: {self.source}",
+            "Limitations:\n" + "\n".join(f"- {item}" for item in self.limitations),
+            f"Metadata: {json.dumps(self.metadata, ensure_ascii=False)}",
             f"Page URL: {self.url}",
             f"Page title: {self.title}",
             f"Meta description: {self.meta_description}",
@@ -155,16 +169,23 @@ class WebsiteExtractor:
         max_content_chars: int = 18_000,
         max_redirects: int = 5,
         transport: httpx.AsyncBaseTransport | None = None,
+        apify_api_token: str = "",
+        apify_instagram_actor_id: str = "",
     ) -> None:
         self.timeout_seconds = timeout_seconds
         self.max_response_bytes = max_response_bytes
         self.max_content_chars = max_content_chars
         self.max_redirects = max_redirects
         self._transport = transport
+        self.apify_api_token = apify_api_token
+        self.apify_instagram_actor_id = apify_instagram_actor_id
 
     async def extract(self, url: str) -> WebsiteContent:
-        """Fetch, validate, and extract business-relevant content from a URL."""
+        """Fetch, validate, and normalize content from a website or social platform."""
         validate_url_syntax(url)
+        platform = _detect_platform(url)
+        if platform != "website":
+            return await self._extract_social(url, platform)
         timeout = httpx.Timeout(self.timeout_seconds)
         transport = self._transport or SSRFProtectedHTTPTransport()
         async with httpx.AsyncClient(
@@ -222,6 +243,147 @@ class WebsiteExtractor:
                 except httpx.HTTPError as exc:
                     raise WebsiteHTTPError("Website could not be reached.") from exc
             raise WebsiteHTTPError("Website redirect handling failed.")
+
+    async def _extract_social(self, url: str, platform: str) -> WebsiteContent:
+        """Extract public social metadata; return explicit limitations when blocked."""
+        timeout = httpx.Timeout(self.timeout_seconds)
+        transport = self._transport or SSRFProtectedHTTPTransport()
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
+        if platform == "youtube":
+            oembed_url = "https://www.youtube.com/oembed?url=" + url + "&format=json"
+            await validate_resolved_url(oembed_url)
+            async with httpx.AsyncClient(transport=transport, timeout=timeout, trust_env=False) as client:
+                try:
+                    response = await client.get(oembed_url, headers=headers)
+                    response.raise_for_status()
+                    data = response.json()
+                except httpx.TimeoutException as exc:
+                    raise WebsiteTimeoutError("YouTube metadata request timed out.") from exc
+                except httpx.HTTPStatusError as exc:
+                    raise WebsiteHTTPError(f"YouTube returned HTTP {exc.response.status_code}.") from exc
+                except (httpx.HTTPError, json.JSONDecodeError, ValueError) as exc:
+                    raise WebsiteHTTPError("YouTube public metadata could not be reached.") from exc
+            title = _clean_text(str(data.get("title", "")))
+            author = _clean_text(str(data.get("author_name", "")))
+            if not title:
+                raise EmptyWebsiteContentError("YouTube returned no usable public metadata.")
+            limitations: list[str] = []
+            if "/channel/" in url or "/@" in url:
+                limitations.append("Channel statistics, recent posts, and transcripts may require another authorized source.")
+            else:
+                limitations.append("Transcript availability and engagement statistics are not verified.")
+            return WebsiteContent(
+                url=url,
+                title=title,
+                meta_description=f"Public YouTube metadata for {title}"[:1000],
+                headings=[title, author] if author else [title],
+                paragraphs=[f"Channel or uploader: {author}"] if author else [],
+                platform="youtube",
+                content_type="channel_or_video",
+                source="youtube_oembed",
+                limitations=limitations,
+                metadata={"author_name": author, "thumbnail_url": str(data.get("thumbnail_url", ""))},
+            )
+
+        await validate_resolved_url(url)
+        async with httpx.AsyncClient(transport=transport, timeout=timeout, follow_redirects=True, trust_env=False) as client:
+            try:
+                response = await client.get(url, headers=headers)
+            except httpx.TimeoutException as exc:
+                raise WebsiteTimeoutError("Social platform request timed out.") from exc
+            except httpx.HTTPError as exc:
+                raise WebsiteHTTPError("Social platform could not be reached.") from exc
+
+        if response.status_code == 403:
+            raise WebsiteHTTPError("Social platform returned HTTP 403: automated access was denied.")
+        if response.status_code == 429:
+            raise WebsiteHTTPError("Social platform returned HTTP 429: access is rate limited.")
+        if response.status_code >= 400:
+            raise WebsiteHTTPError(f"Social platform returned HTTP {response.status_code}.")
+
+        content_type = response.headers.get("content-type", "").lower()
+        if content_type and "text/html" not in content_type:
+            raise WebsiteHTTPError("Social URL did not return an HTML page.")
+        soup = BeautifulSoup(response.content, "html.parser")
+        metadata = _social_metadata(soup)
+        title = metadata.pop("title", "") or _clean_text(soup.title.get_text(" ", strip=True) if soup.title else "")
+        description = metadata.pop("description", "")
+
+        if not description:
+            meta_description = soup.find("meta", attrs={"name": "description"})
+            description = _clean_text(meta_description.get("content", "")) if meta_description else ""
+
+        html_text = response.text
+        login_wall = bool(re.search(r'log in|login|sign up|password', html_text, re.IGNORECASE))
+
+        source = "public_html"
+        if platform == "instagram" and (login_wall or not title or not description) and self.apify_api_token and self.apify_instagram_actor_id:
+            apify_data = await self._extract_instagram_apify(url)
+            if apify_data:
+                title = _clean_text(str(apify_data.get("title") or apify_data.get("name") or apify_data.get("username") or ""))
+                description = _clean_text(str(apify_data.get("description") or apify_data.get("biography") or apify_data.get("bio") or ""))
+                metadata.update({key: _clean_text(str(value)) for key, value in apify_data.items() if isinstance(value, (str, int, float)) and key not in {"description", "biography", "bio", "title", "name"}})
+                login_wall = False
+                metadata["scraper"] = "apify"
+                source = "apify"
+        username = _platform_username(url, platform)
+        limitations: list[str] = []
+
+        if platform == "instagram":
+            limitations.append("Public HTML may omit profile bio, follower counts, and posts; login or bot protection can require another authorized source.")
+        elif platform == "facebook":
+            limitations.append("Facebook may require login or may omit public profile and post details.")
+        elif platform == "x":
+            limitations.append("X may block automated requests or omit post and profile details.")
+
+        if login_wall:
+            limitations.insert(0, f"The {platform} public page appears to contain a login or access restriction.")
+            extraction_status = "limited"
+        elif title or description:
+            extraction_status = "success"
+        else:
+            extraction_status = "limited"
+
+        fallback_title = title or (username and f"@{username}" if platform in {"instagram", "x"} else username)
+        fallback_title = fallback_title or platform.title()
+        metadata["username"] = username
+        return WebsiteContent(
+            url=url,
+            title=_clean_text(fallback_title)[:500],
+            meta_description=_clean_text(description)[:1000],
+            headings=[_clean_text(fallback_title)] if fallback_title else [],
+            paragraphs=[_clean_text(description)] if description else [],
+            platform=platform,
+            content_type="profile" if username else "public_post",
+            extraction_status=extraction_status,
+            source=source,
+            limitations=limitations,
+            metadata=metadata,
+        )
+
+    async def _extract_instagram_apify(self, url: str) -> dict[str, Any] | None:
+        """Call a configured Apify Instagram actor and use its first profile result."""
+        actor = self.apify_instagram_actor_id.strip("/")
+        endpoint = f"https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items"
+        payload = {"directUrls": [url], "resultsLimit": 1}
+        headers = {"Authorization": f"Bearer {self.apify_api_token}"}
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(max(20, self.timeout_seconds), trust_env=False), trust_env=False) as client:
+                response = await client.post(endpoint, headers=headers, json=payload)
+                response.raise_for_status()
+                data = response.json()
+        except httpx.TimeoutException:
+            return None
+        except httpx.HTTPError:
+            return None
+        if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+            return None
+        return data[0]
 
     def parse_html(self, html: bytes, page_url: str) -> WebsiteContent:
         """Extract and de-duplicate the title, metadata, headings, and page text."""
@@ -287,6 +449,49 @@ class WebsiteExtractor:
         if len(result.to_prompt_text(self.max_content_chars).strip()) < 30:
             raise EmptyWebsiteContentError("Website contained too little useful content to analyze.")
         return result
+
+
+def _detect_platform(url: str) -> str:
+    host = (urlsplit(url).hostname or "").lower()
+    if host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be":
+        return "youtube"
+    if host == "instagram.com" or host.endswith(".instagram.com"):
+        return "instagram"
+    if host == "facebook.com" or host.endswith(".facebook.com"):
+        return "facebook"
+    if host in {"x.com", "twitter.com"} or host.endswith(".x.com") or host.endswith(".twitter.com"):
+        return "x"
+    return "website"
+
+
+def _social_metadata(soup: BeautifulSoup) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    for meta in soup.find_all("meta"):
+        key = meta.get("property") or meta.get("name")
+        value = _clean_text(str(meta.get("content", "")))
+        if not key or not value:
+            continue
+        normalized = key.lower()
+        if normalized in {"og:title", "twitter:title"} and "title" not in metadata:
+            metadata["title"] = value
+        elif normalized in {"og:description", "twitter:description"} and "description" not in metadata:
+            metadata["description"] = value
+        elif normalized in {"og:image", "twitter:image"}:
+            metadata.setdefault("image_url", value)
+        elif normalized in {"og:url", "twitter:site"}:
+            metadata.setdefault("canonical_url", value)
+    return metadata
+
+
+def _platform_username(url: str, platform: str) -> str:
+    path_parts = [part for part in urlsplit(url).path.split("/") if part]
+    if not path_parts:
+        return ""
+    if platform == "youtube":
+        return path_parts[-1]
+    if platform in {"instagram", "x", "facebook"}:
+        return path_parts[0]
+    return ""
 
 
 def _clean_text(value: str) -> str:

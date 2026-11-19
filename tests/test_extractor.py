@@ -10,6 +10,7 @@ import pytest
 from app.services import website_extractor as extractor_module
 from app.services.website_extractor import (
     EmptyWebsiteContentError,
+    _detect_platform,
     WebsiteExtractor,
     WebsiteHTTPError,
     WebsiteTimeoutError,
@@ -20,6 +21,80 @@ from app.utils.validators import (
     validate_resolved_url,
     validate_url_syntax,
 )
+
+
+@pytest.mark.parametrize(
+    ("url", "platform"),
+    [
+        ("https://www.instagram.com/crestspot", "instagram"),
+        ("https://youtube.com/@YouTube", "youtube"),
+        ("https://youtu.be/dQw4w9WgXcQ", "youtube"),
+        ("https://facebook.com/Meta", "facebook"),
+        ("https://x.com/openai", "x"),
+        ("https://example.com", "website"),
+    ],
+)
+def test_social_platform_detection(url: str, platform: str) -> None:
+    assert _detect_platform(url) == platform
+
+
+@pytest.mark.asyncio
+async def test_instagram_login_wall_is_reported_as_limited() -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            content=b"<html><head><title>Instagram</title></head><body><button>Log in</button></body></html>",
+        )
+
+    extractor = WebsiteExtractor(transport=httpx.MockTransport(handler))
+    with patch("app.services.website_extractor.validate_resolved_url", new=AsyncMock(return_value=("instagram.com", 443, ["31.13.65.36"]))):
+        result = await extractor.extract("https://www.instagram.com/crestspot")
+
+    assert result.platform == "instagram"
+    assert result.content_type == "profile"
+    assert result.extraction_status == "limited"
+    assert result.metadata["username"] == "crestspot"
+    assert any("login" in limitation.lower() for limitation in result.limitations)
+
+
+@pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_instagram_apify_fallback_is_used_when_configured() -> None:
+    html_transport = httpx.MockTransport(
+        lambda _: httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            content=b"<html><head><title>Instagram</title></head><body>Log in</body></html>",
+        )
+    )
+    extractor = WebsiteExtractor(
+        transport=html_transport,
+        apify_api_token="test-token",
+        apify_instagram_actor_id="apify/instagram-profile-scraper",
+    )
+
+    async def fake_apify(_: str) -> dict[str, object]:
+        return {"username": "crestspot", "name": "CrestSpot", "description": "Creative visual studio"}
+
+    extractor._extract_instagram_apify = fake_apify  # type: ignore[method-assign]
+    with patch("app.services.website_extractor.validate_resolved_url", new=AsyncMock(return_value=("instagram.com", 443, ["31.13.65.36"]))):
+        result = await extractor.extract("https://www.instagram.com/crestspot")
+
+    assert result.title == "CrestSpot"
+    assert result.meta_description == "Creative visual studio"
+    assert result.extraction_status == "success"
+    assert result.source == "apify"
+
+
+@pytest.mark.asyncio
+async def test_social_http_status_is_exposed() -> None:
+    extractor = WebsiteExtractor(
+        transport=httpx.MockTransport(lambda _: httpx.Response(403, content=b"blocked"))
+    )
+    with patch("app.services.website_extractor.validate_resolved_url", new=AsyncMock(return_value=("instagram.com", 443, ["31.13.65.36"]))):
+        with pytest.raises(WebsiteHTTPError, match="403"):
+            await extractor.extract("https://www.instagram.com/crestspot")
 
 
 def test_valid_http_and_https_urls_are_accepted() -> None:

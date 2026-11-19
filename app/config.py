@@ -25,6 +25,8 @@ class Settings:
     max_content_chars: int = int(os.getenv("MAX_CONTENT_CHARS", "18000"))
     cache_ttl_seconds: int = int(os.getenv("CACHE_TTL_SECONDS", "1800"))
     cache_max_entries: int = int(os.getenv("CACHE_MAX_ENTRIES", "256"))
+    apify_api_token: str = os.getenv("APIFY_API_TOKEN", "").strip()
+    apify_instagram_actor_id: str = os.getenv("APIFY_INSTAGRAM_ACTOR_ID", "").strip()
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -42,6 +44,8 @@ class Settings:
             max_content_chars=int(os.getenv("MAX_CONTENT_CHARS", "18000")),
             cache_ttl_seconds=int(os.getenv("CACHE_TTL_SECONDS", "1800")),
             cache_max_entries=int(os.getenv("CACHE_MAX_ENTRIES", "256")),
+            apify_api_token=os.getenv("APIFY_API_TOKEN", "").strip(),
+            apify_instagram_actor_id=os.getenv("APIFY_INSTAGRAM_ACTOR_ID", "").strip(),
         )
 
 

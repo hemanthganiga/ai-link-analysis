@@ -78,6 +78,16 @@ Other environment settings:
 | `MAX_CONTENT_CHARS` | `18000` | Approximate upper character bound for LLM input content |
 | `CACHE_TTL_SECONDS` | `1800` | In-memory response cache lifetime; zero disables caching |
 | `CACHE_MAX_ENTRIES` | `256` | Maximum in-memory cached analyses |
+| `APIFY_API_TOKEN` | Empty | Optional Apify token for Instagram profile fallback |
+| `APIFY_INSTAGRAM_ACTOR_ID` | Empty | Optional Apify Instagram profile actor ID |
+
+## Supported link types
+
+- Ordinary HTTP(S) websites use secure HTTPX and BeautifulSoup extraction.
+- Instagram profiles use public HTML metadata and report login/bot/access restrictions explicitly. An optional Apify actor can provide richer public profile data when `APIFY_API_TOKEN` and `APIFY_INSTAGRAM_ACTOR_ID` are configured.
+- YouTube channels, videos, and Shorts use the public YouTube oEmbed metadata endpoint.
+- Facebook pages/posts and X/Twitter profiles/posts use public HTML metadata when accessible; login walls and blocks are reported.
+- Social extraction does not infer followers, engagement, post counts, or products unless public source evidence supports them.
 
 ## Run locally
 
@@ -329,7 +339,7 @@ The current deployment is hosted on Render and deployed from the `main` branch o
 
 ## Limitations
 
-- Only the requested URL's page is fetched. Multi-page crawling, robots/sitemap parsing, browser-rendered JavaScript sites, and external competitor-site verification are not implemented.
+- Only the requested public URL is fetched. Multi-page crawling, robots/sitemap parsing, browser-rendered application data, followers, engagement counts, and external competitor-site verification are not guaranteed.
 - Competitor output is not market research. Suggestions are labeled unverified and should be validated before business decisions.
 - Search terms are model-generated recommendations, not search-volume or ranking results.
 - Technical SEO observations are limited to fetched HTML; no Lighthouse, schema, canonical, robots, backlink, or Search Console audits are run.

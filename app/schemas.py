@@ -9,6 +9,16 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.utils.validators import validate_url_syntax
 
 
+class ExtractionInfo(BaseModel):
+    """Normalized source metadata and extraction limitations."""
+
+    platform: Literal["website", "instagram", "youtube", "facebook", "x"]
+    content_type: str
+    extraction_status: Literal["success", "limited"]
+    source: str
+    limitations: list[str] = Field(default_factory=list)
+
+
 class AnalysisRequest(BaseModel):
     """A website URL submitted for business and marketing analysis."""
 
@@ -144,3 +154,4 @@ class AnalysisResponse(BaseModel):
     brand: Brand
     analysis: BusinessAnalysis
     usage: TokenUsage
+    extraction: ExtractionInfo | None = None

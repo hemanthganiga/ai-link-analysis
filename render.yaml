@@ -14,3 +14,7 @@ services:
         value: openai/gpt-oss-20b
       - key: GROQ_API_KEY
         sync: false
+      - key: APIFY_API_TOKEN
+        sync: false
+      - key: APIFY_INSTAGRAM_ACTOR_ID
+        sync: false

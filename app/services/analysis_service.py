@@ -9,7 +9,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 
 from app.config import Settings
-from app.schemas import AnalysisResponse, Brand, TokenUsage
+from app.schemas import AnalysisResponse, Brand, ExtractionInfo, TokenUsage
 from app.services.competitor_service import build_analysis_prompt
 from app.services.llm_service import LLMConfigurationError, LLMService, create_provider
 from app.services.website_extractor import WebsiteContent, WebsiteExtractor
@@ -35,6 +35,8 @@ class AnalysisService:
             timeout_seconds=settings.website_timeout_seconds,
             max_response_bytes=settings.max_response_bytes,
             max_content_chars=settings.max_content_chars,
+            apify_api_token=settings.apify_api_token,
+            apify_instagram_actor_id=settings.apify_instagram_actor_id,
         )
         if llm_service is not None:
             self.llm_service = llm_service
@@ -77,6 +79,13 @@ class AnalysisService:
                 output_tokens=usage["output_tokens"],
                 total_tokens=usage["total_tokens"],
             ),
+            extraction=ExtractionInfo(
+                platform=content.platform,
+                content_type=content.content_type,
+                extraction_status=content.extraction_status,
+                source=content.source,
+                limitations=content.limitations,
+            ),
         )
         async with self._cache_lock:
             self._store(cache_key, response)
@@ -106,10 +115,16 @@ class AnalysisService:
 
 def _brand_details(content: WebsiteContent, industry: str) -> tuple[str, str, str]:
     """Build conservative response-level brand details from page evidence."""
+    username = content.metadata.get("username", "").strip()
+    if content.platform in {"instagram", "x"} and username:
+        name = f"@{username}"
+    else:
+        name = ""
     page_title = content.title.strip()
     meta_description = content.meta_description.strip()
     headings = content.headings
-    name = page_title.split("|")[0].split("—")[0].split("–")[0].strip()
+    if not name:
+        name = page_title.split("|")[0].split("—")[0].split("–")[0].strip()
     if not name and headings:
         name = headings[0][:120]
     if not name:
