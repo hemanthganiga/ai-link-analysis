@@ -316,15 +316,16 @@ uvicorn app.main:app --host 0.0.0.0 --port $PORT
 
 1. Push this project to a public GitHub repository.
 2. In Render, create a new Blueprint from the repository, or create a Python web service with `pip install -r requirements.txt` as the build command and the startup command above.
-3. Configure `LLM_PROVIDER`, `LLM_MODEL`, and the selected provider's `LLM_API_KEY` as secret environment variables in Render.
+3. Configure `LLM_PROVIDER`, `LLM_MODEL`, and for Groq, `GROQ_API_KEY` (or `LLM_API_KEY`) as secret environment variables in Render.
 4. Wait for a successful deploy, then verify `/health`, `/docs`, and a live POST request with a valid provider key.
 5. Add the real deployment links to your submission only after the service is live.
 
-- Public API URL: `https://<your-render-service>.onrender.com`
-- Swagger: `https://<your-render-service>.onrender.com/docs`
-- Analysis endpoint: `https://<your-render-service>.onrender.com/link-analysis`
+- Public API URL: https://ai-link-analysis-wci2.onrender.com
+- Health: https://ai-link-analysis-wci2.onrender.com/health
+- Swagger: https://ai-link-analysis-wci2.onrender.com/docs
+- Analysis endpoint: https://ai-link-analysis-wci2.onrender.com/link-analysis
 
-No deployment has been performed by this repository.
+The current deployment is hosted on Render and deployed from the `main` branch of this GitHub repository.
 
 ## Limitations
 
@@ -346,7 +347,7 @@ git add .
 git status
 git commit -m "Build AI website link analysis API"
 git branch -M main
-git remote add origin https://github.com/<your-user>/<your-public-repository>.git
+git remote add origin https://github.com/hemanthganiga/ai-link-analysis.git
 git push -u origin main
 ```
 
