@@ -9,7 +9,7 @@ import pytest
 from app.config import Settings
 from app.schemas import BusinessAnalysis
 from app.services.analysis_service import AnalysisService
-from app.services.llm_service import ProviderResult
+from app.services.llm_service import LLMProviderError, ProviderResult
 from app.services.website_extractor import WebsiteContent
 
 
@@ -122,3 +122,37 @@ async def test_analysis_service_returns_brand_insights_and_caches_llm_result() -
     assert second.usage.cache_hit is True
     assert extractor.calls == 2
     assert llm.calls == 1
+
+
+class RateLimitedLLM:
+    async def analyze(self, _: str) -> tuple[BusinessAnalysis, dict[str, int | None]]:
+        raise LLMProviderError("The LLM provider returned HTTP 429.")
+
+
+@pytest.mark.asyncio
+async def test_social_analysis_returns_explicit_fallback_when_llm_is_rate_limited() -> None:
+    settings = Settings(llm_provider="groq", llm_model="openai/gpt-oss-20b", llm_api_key="test-key")
+    extractor = FakeExtractor()
+
+    async def extract_instagram(_: str) -> WebsiteContent:
+        return WebsiteContent(
+            url="https://www.instagram.com/crestspot",
+            title="Instagram",
+            meta_description="",
+            platform="instagram",
+            content_type="profile",
+            extraction_status="limited",
+            source="public_html",
+            limitations=["Public HTML contained a login restriction."],
+            metadata={"username": "crestspot"},
+        )
+
+    extractor.extract = extract_instagram  # type: ignore[method-assign]
+    service = AnalysisService(settings, extractor=extractor, llm_service=RateLimitedLLM())
+
+    result = await service.analyze("https://www.instagram.com/crestspot")
+
+    assert result.brand.name == "@crestspot"
+    assert result.brand.category == "Insufficient data available to identify industry." or result.brand.category == "Unknown"
+    assert "provider rate limiting" in result.analysis.competitor_analysis.research_limitations.lower()
+    assert len(result.analysis.target_search_queries) == 5

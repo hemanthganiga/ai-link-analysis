@@ -88,6 +88,7 @@ Other environment settings:
 - YouTube channels, videos, and Shorts use the public YouTube oEmbed metadata endpoint.
 - Facebook pages/posts and X/Twitter profiles/posts use public HTML metadata when accessible; login walls and blocks are reported.
 - Social extraction does not infer followers, engagement, post counts, or products unless public source evidence supports them.
+- If Groq is rate-limited or unavailable, social and website requests return an explicitly labeled evidence-safe degraded analysis rather than invented brand facts.
 
 ## Run locally
 

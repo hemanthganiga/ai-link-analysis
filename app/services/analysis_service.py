@@ -9,9 +9,25 @@ from collections import OrderedDict
 from dataclasses import dataclass
 
 from app.config import Settings
-from app.schemas import AnalysisResponse, Brand, ExtractionInfo, TokenUsage
+from app.schemas import (
+    AnalysisResponse,
+    Brand,
+    BusinessAnalysis,
+    CompetitorAnalysis,
+    ExtractionInfo,
+    SearchQuery,
+    SEOImprovements,
+    ServiceRecommendation,
+    TargetAudience,
+    TokenUsage,
+)
 from app.services.competitor_service import build_analysis_prompt
-from app.services.llm_service import LLMConfigurationError, LLMService, create_provider
+from app.services.llm_service import (
+    LLMConfigurationError,
+    LLMProviderError,
+    LLMService,
+    create_provider,
+)
 from app.services.website_extractor import WebsiteContent, WebsiteExtractor
 
 
@@ -67,7 +83,13 @@ class AnalysisService:
                     update={"usage": cached.usage.model_copy(update={"cache_hit": True})}
                 )
 
-        analysis, usage = await self.llm_service.analyze(prompt)
+        try:
+            analysis, usage = await self.llm_service.analyze(prompt)
+        except LLMProviderError as exc:
+            if "429" not in str(exc) and "rate" not in str(exc).lower():
+                raise
+            analysis = _degraded_social_analysis(content) if content.platform != "website" else _degraded_website_analysis(content)
+            usage = {"input_tokens": None, "output_tokens": None, "total_tokens": None}
         name, category, summary = _brand_details(content, analysis.competitor_analysis.industry)
         response = AnalysisResponse(
             website=url,
@@ -114,6 +136,90 @@ class AnalysisService:
             self._cache.popitem(last=False)
 
 
+def _degraded_social_analysis(content: WebsiteContent) -> BusinessAnalysis:
+    """Create an explicitly limited, evidence-safe response during provider outages."""
+    username = content.metadata.get("username", "").strip()
+    identity = f"@{username}" if username else content.platform.title()
+    limitations = "; ".join(content.limitations) or "The public source did not provide enough profile content."
+    competitor = CompetitorAnalysis(
+        brand_overview=f"Limited public metadata is available for {identity}; detailed brand facts could not be verified.",
+        industry="Unknown",
+        brand_strengths=[],
+        opportunities=["Add a public bio, products, or services to the profile"],
+        research_limitations=f"AI analysis was unavailable due to provider rate limiting. {limitations}",
+    )
+    platforms = ["Google", "Facebook", "Instagram", "LinkedIn", "X"]
+    queries = [
+        SearchQuery(
+            query=f"{identity} official profile {platform}",
+            platforms=[platform],
+            intent="Brand discovery",
+            business_relevance="Unverified brand and presence discovery",
+            target_audience="People seeking the official profile",
+        )
+        for platform in platforms
+    ]
+    return BusinessAnalysis(
+        competitor_analysis=competitor,
+        target_search_queries=queries,
+        seo_improvements=SEOImprovements(
+            primary_keyword=identity,
+            meta_description=f"Official profile for {identity}",
+            secondary_keywords=[],
+            long_tail_keywords=[],
+            recommended_title=f"{identity} | Official Profile",
+        ),
+        top_services=[
+            ServiceRecommendation(
+                service_name="Verify public profile",
+                description="Confirm the official profile, public bio, and offered services from authoritative sources.",
+                target_industry="Unknown",
+                target_customer="Potential customers",
+                main_benefit="Prevents unsupported brand assumptions",
+                source_status="recommended",
+            )
+            for _ in range(5)
+        ],
+        target_audience=TargetAudience(
+            primary_audience=["Potential customers"],
+            secondary_audience=[],
+            industries=[],
+            customer_profiles=[],
+            customer_pain_points=[],
+            customer_interests=[],
+            geographic_markets=[],
+            potential_requirements=[],
+        ),
+    )
+
+
+def _degraded_website_analysis(content: WebsiteContent) -> BusinessAnalysis:
+    """Create a minimal evidence-safe fallback for non-social pages during provider outages."""
+    identity = content.title or content.url
+    competitor = CompetitorAnalysis(
+        brand_overview=f"Public metadata was extracted for {identity}, but AI analysis was unavailable.",
+        industry="Unknown",
+        brand_strengths=[],
+        opportunities=["Retry analysis when the LLM provider is available"],
+        research_limitations="Provider rate limiting prevented complete AI analysis.",
+    )
+    platforms = ["Google", "Facebook", "Instagram", "LinkedIn", "X"]
+    queries = [
+        SearchQuery(query=f"{identity} official information", platforms=[platform], intent="Brand discovery", business_relevance="Official source discovery", target_audience="Potential customers")
+        for platform in platforms
+    ]
+    return BusinessAnalysis(
+        competitor_analysis=competitor,
+        target_search_queries=queries,
+        seo_improvements=SEOImprovements(primary_keyword=identity[:200], meta_description=content.meta_description[:500], recommended_title=identity[:200]),
+        top_services=[
+            ServiceRecommendation(service_name="Verify official offerings", description="Confirm the organization's real services from authoritative page evidence.", target_industry="Unknown", target_customer="Potential customers", main_benefit="Avoid unsupported recommendations", source_status="recommended")
+            for _ in range(5)
+        ],
+        target_audience=TargetAudience(primary_audience=["Potential customers"], secondary_audience=[], industries=[], customer_profiles=[], customer_pain_points=[], customer_interests=[], geographic_markets=[], potential_requirements=[]),
+    )
+
+
 def _brand_details(content: WebsiteContent, industry: str) -> tuple[str, str, str]:
     """Build conservative response-level brand details from page evidence."""
     username = content.metadata.get("username", "").strip()
@@ -132,5 +238,12 @@ def _brand_details(content: WebsiteContent, industry: str) -> tuple[str, str, st
         from urllib.parse import urlsplit
 
         name = urlsplit(content.url).hostname or "Unknown brand"
-    summary = meta_description or (headings[0] if headings else "Business details inferred from website content.")
+    if content.platform in {"instagram", "facebook", "x", "youtube"}:
+        summary = meta_description or (
+            f"Public {content.platform.title()} profile for {name}; detailed public content was not available."
+            if content.extraction_status == "limited"
+            else (headings[0] if headings else f"Public {content.platform.title()} metadata")
+        )
+    else:
+        summary = meta_description or (headings[0] if headings else "Business details inferred from website content.")
     return name[:160], industry or "Not clearly identified", summary[:500]
