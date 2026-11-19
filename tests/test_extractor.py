@@ -114,8 +114,10 @@ async def test_social_http_status_is_exposed() -> None:
         transport=httpx.MockTransport(lambda _: httpx.Response(403, content=b"blocked"))
     )
     with patch("app.services.website_extractor.validate_resolved_url", new=AsyncMock(return_value=("instagram.com", 443, ["31.13.65.36"]))):
-        with pytest.raises(WebsiteHTTPError, match="403"):
-            await extractor.extract("https://www.instagram.com/crestspot")
+        result = await extractor.extract("https://www.instagram.com/crestspot")
+    assert result.platform == "instagram"
+    assert result.extraction_status == "limited"
+    assert "403" in result.limitations[0]
 
 
 def test_valid_http_and_https_urls_are_accepted() -> None:

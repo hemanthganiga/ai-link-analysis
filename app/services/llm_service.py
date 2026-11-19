@@ -1,4 +1,4 @@
-﻿"""Provider-neutral asynchronous LLM integration with JSON validation and usage."""
+"""Provider-neutral asynchronous LLM integration with JSON validation and usage."""
 
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ class HTTPProvider:
     ) -> dict[str, Any]:
         if not self.api_key:
             raise LLMConfigurationError(
-                "LLM_API_KEY is required. Add the selected provider's API key to the environment."
+                "GROQ_API_KEY or LLM_API_KEY is required for Groq. For other providers, set LLM_API_KEY."
             )
         try:
             async with httpx.AsyncClient(timeout=self.timeout, trust_env=True) as client:
@@ -132,6 +132,7 @@ class GroqProvider(HTTPProvider):
                     {"role": "user", "content": prompt},
                 ],
                 "response_format": {"type": "json_object"},
+                "max_tokens": 6000,
             },
         )
         try:
@@ -267,4 +268,5 @@ class LLMService:
             "total_tokens": result.total_tokens,
         }
         return analysis, usage
+
 

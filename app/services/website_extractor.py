@@ -321,12 +321,34 @@ class WebsiteExtractor:
             except httpx.HTTPError as exc:
                 raise WebsiteHTTPError("Social platform could not be reached.") from exc
 
-        if response.status_code == 403:
-            raise WebsiteHTTPError("Social platform returned HTTP 403: automated access was denied.")
-        if response.status_code == 429:
-            raise WebsiteHTTPError("Social platform returned HTTP 429: access is rate limited.")
+        if response.status_code in {403, 429}:
+            username = _platform_username(url, platform)
+            return WebsiteContent(
+                url=url,
+                title=f"@{username}" if username and platform in {"instagram", "x"} else platform.title(),
+                meta_description="",
+                headings=[f"@{username}" if username and platform in {"instagram", "x"} else platform.title()],
+                platform=platform,
+                content_type="profile" if username else "public_post",
+                extraction_status="limited",
+                source="public_html",
+                limitations=[f"The {platform} public page returned HTTP {response.status_code}; automated access was denied or rate limited."],
+                metadata={"username": username},
+            )
         if response.status_code >= 400:
-            raise WebsiteHTTPError(f"Social platform returned HTTP {response.status_code}.")
+            username = _platform_username(url, platform)
+            return WebsiteContent(
+                url=url,
+                title=f"@{username}" if username and platform in {"instagram", "x"} else platform.title(),
+                meta_description="",
+                headings=[f"@{username}" if username and platform in {"instagram", "x"} else platform.title()],
+                platform=platform,
+                content_type="profile" if username else "public_post",
+                extraction_status="limited",
+                source="public_html",
+                limitations=[f"The {platform} public page returned HTTP {response.status_code}; the requested content may be private or inaccessible."],
+                metadata={"username": username},
+            )
 
         content_type = response.headers.get("content-type", "").lower()
         if content_type and "text/html" not in content_type:

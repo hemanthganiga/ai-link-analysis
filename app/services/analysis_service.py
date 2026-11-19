@@ -50,8 +50,9 @@ class AnalysisService:
     async def analyze(self, url: str) -> AnalysisResponse:
         """Analyze a URL and return the stable response contract."""
         if not self.settings.llm_api_key:
+            key_name = "GROQ_API_KEY or LLM_API_KEY" if self.settings.llm_provider == "groq" else "LLM_API_KEY"
             raise LLMConfigurationError(
-                "LLM_API_KEY is required. Add the selected provider's API key to the environment."
+                f"{key_name} is required. Add the selected provider's API key to the environment."
             )
         content = await self.extractor.extract(url)
         prompt = build_analysis_prompt(content, self.settings.max_content_chars)
