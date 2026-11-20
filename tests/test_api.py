@@ -182,6 +182,9 @@ def test_blocked_social_profile_returns_explanation_instead_of_analysis() -> Non
     assert payload["extraction"]["extraction_status"] == "limited"
     assert payload["extraction"]["content"]["title"] == ""
     assert payload["extraction"]["content"]["metadata"]["requested_handle"] == "crestspot"
+    assert payload["extraction"]["limitations"] == [
+        "The public page returned HTTP 403."
+    ]
     assert "HTTP 403" in payload["detail"]
 
 

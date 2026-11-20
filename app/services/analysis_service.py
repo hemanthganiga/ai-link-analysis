@@ -175,7 +175,9 @@ def build_extraction_info(
         return clipped
 
     limitations = list(content.limitations)
-    if error_detail and error_detail not in limitations:
+    if error_detail and not any(
+        limitation and limitation in error_detail for limitation in limitations
+    ):
         limitations.append(error_detail)
 
     return ExtractionInfo(
