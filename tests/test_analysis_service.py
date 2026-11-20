@@ -8,7 +8,11 @@ import pytest
 
 from app.config import Settings
 from app.schemas import BusinessAnalysis
-from app.services.analysis_service import AnalysisService, _brand_details
+from app.services.analysis_service import (
+    AnalysisService,
+    _brand_details,
+    _qualify_audience_geography,
+)
 from app.services.llm_service import LLMProviderError
 from app.services.website_extractor import EmptyWebsiteContentError, WebsiteContent
 
@@ -316,3 +320,21 @@ def test_website_summary_uses_extracted_text_instead_of_a_generic_fallback() -> 
     _, _, summary = _brand_details(content, "Unknown")
 
     assert summary == "This exact paragraph was retrieved from the page."
+
+
+def test_geographic_audience_markets_must_appear_in_extracted_page_text() -> None:
+    analysis = _overclaim_analysis()
+    audience = analysis.target_audience.model_copy(
+        update={"geographic_markets": ["Worldwide", "United States", "US"]}
+    )
+    analysis = analysis.model_copy(update={"target_audience": audience})
+    content = WebsiteContent(
+        url="https://example.com/",
+        title="Example",
+        meta_description="",
+        paragraphs=["This service is available to customers in the United States."],
+    )
+
+    qualified = _qualify_audience_geography(content, analysis)
+
+    assert qualified.target_audience.geographic_markets == ["United States"]

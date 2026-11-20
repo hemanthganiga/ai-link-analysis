@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -110,6 +111,7 @@ class AnalysisService:
 
         analysis, usage = await self.llm_service.analyze(prompt)
         analysis = _qualify_limited_social_analysis(content, analysis)
+        analysis = _qualify_audience_geography(content, analysis)
         name, category, summary = _brand_details(content, analysis.competitor_analysis.industry)
         response = AnalysisResponse(
             website=url,
@@ -249,6 +251,40 @@ def _qualify_limited_social_analysis(
             "competitor_analysis": competitor_analysis,
             "target_audience": TargetAudience(),
             "top_services": recommended_services,
+        }
+    )
+
+
+def _qualify_audience_geography(
+    content: WebsiteContent, analysis: BusinessAnalysis
+) -> BusinessAnalysis:
+    """Keep geographic-market claims only when the extracted page states them."""
+    source_text = " ".join(
+        [
+            content.title,
+            content.meta_description,
+            *content.headings,
+            *content.paragraphs,
+            *content.service_descriptions,
+        ]
+    ).casefold()
+    audience = analysis.target_audience
+    verified_markets = [
+        market
+        for market in audience.geographic_markets
+        if re.search(
+            rf"(?<!\w){re.escape(market.casefold())}(?!\w)",
+            source_text,
+        )
+    ]
+    if verified_markets == audience.geographic_markets:
+        return analysis
+
+    return analysis.model_copy(
+        update={
+            "target_audience": audience.model_copy(
+                update={"geographic_markets": verified_markets}
+            )
         }
     )
 
