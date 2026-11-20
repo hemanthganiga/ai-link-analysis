@@ -9,8 +9,8 @@ import pytest
 from app.config import Settings
 from app.schemas import BusinessAnalysis
 from app.services.analysis_service import AnalysisService
-from app.services.llm_service import LLMProviderError, ProviderResult
-from app.services.website_extractor import WebsiteContent
+from app.services.llm_service import LLMProviderError
+from app.services.website_extractor import EmptyWebsiteContentError, WebsiteContent
 
 
 def _analysis_json() -> str:
@@ -130,19 +130,20 @@ class RateLimitedLLM:
 
 
 @pytest.mark.asyncio
-async def test_social_analysis_returns_explicit_fallback_when_llm_is_rate_limited() -> None:
+async def test_rate_limited_llm_error_is_not_replaced_with_fabricated_analysis() -> None:
     settings = Settings(llm_provider="groq", llm_model="openai/gpt-oss-20b", llm_api_key="test-key")
     extractor = FakeExtractor()
 
     async def extract_instagram(_: str) -> WebsiteContent:
         return WebsiteContent(
             url="https://www.instagram.com/crestspot",
-            title="Instagram",
-            meta_description="",
+            title="CrestSpot",
+            meta_description="CrestSpot is an independent creative studio for growing brands.",
             platform="instagram",
             content_type="profile",
-            extraction_status="limited",
+            extraction_status="success",
             source="public_html",
+            paragraphs=["CrestSpot is an independent creative studio for growing brands."],
             limitations=["Public HTML contained a login restriction."],
             metadata={"username": "crestspot"},
         )
@@ -150,9 +151,31 @@ async def test_social_analysis_returns_explicit_fallback_when_llm_is_rate_limite
     extractor.extract = extract_instagram  # type: ignore[method-assign]
     service = AnalysisService(settings, extractor=extractor, llm_service=RateLimitedLLM())
 
-    result = await service.analyze("https://www.instagram.com/crestspot")
+    with pytest.raises(LLMProviderError, match="HTTP 429"):
+        await service.analyze("https://www.instagram.com/crestspot")
 
-    assert result.brand.name == "@crestspot"
-    assert result.brand.category == "Insufficient data available to identify industry." or result.brand.category == "Unknown"
-    assert "provider rate limiting" in result.analysis.competitor_analysis.research_limitations.lower()
-    assert len(result.analysis.target_search_queries) == 5
+
+@pytest.mark.asyncio
+async def test_social_page_without_public_content_is_rejected_before_llm() -> None:
+    settings = Settings(llm_provider="groq", llm_model="openai/gpt-oss-20b", llm_api_key="test-key")
+    extractor = FakeExtractor()
+
+    async def extract_blocked_profile(_: str) -> WebsiteContent:
+        return WebsiteContent(
+            url="https://www.instagram.com/crestspot",
+            title="@crestspot",
+            meta_description="",
+            platform="instagram",
+            content_type="profile",
+            extraction_status="limited",
+            limitations=["The public page returned HTTP 403."],
+            metadata={"username": "crestspot"},
+        )
+
+    extractor.extract = extract_blocked_profile  # type: ignore[method-assign]
+    llm = FakeLLM()
+    service = AnalysisService(settings, extractor=extractor, llm_service=llm)
+
+    with pytest.raises(EmptyWebsiteContentError, match="No usable public content"):
+        await service.analyze("https://www.instagram.com/crestspot")
+    assert llm.calls == 0

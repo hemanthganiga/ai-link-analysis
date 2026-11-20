@@ -244,6 +244,62 @@ class WebsiteExtractor:
                     raise WebsiteHTTPError("Website could not be reached.") from exc
             raise WebsiteHTTPError("Website redirect handling failed.")
 
+    async def _request_public(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        headers: dict[str, str],
+    ) -> httpx.Response:
+        """Fetch a bounded response while validating every redirect destination."""
+        current_url = url
+        for redirect_count in range(self.max_redirects + 1):
+            try:
+                await validate_resolved_url(current_url)
+            except UnsafeWebsiteURLError as exc:
+                if redirect_count:
+                    raise WebsiteHTTPError(
+                        "Website redirected to an unsafe network destination."
+                    ) from exc
+                raise
+
+            async with client.stream("GET", current_url, headers=headers) as response:
+                if response.status_code in _REDIRECT_STATUSES:
+                    if redirect_count >= self.max_redirects:
+                        raise WebsiteHTTPError(
+                            "Website exceeded the maximum number of redirects."
+                        )
+                    location = response.headers.get("location")
+                    if not location:
+                        raise WebsiteHTTPError(
+                            "Website returned a redirect without a destination."
+                        )
+                    current_url = urljoin(current_url, location)
+                    try:
+                        validate_url_syntax(current_url)
+                    except ValueError as exc:
+                        raise WebsiteHTTPError(
+                            "Website redirected to an invalid or unsafe URL."
+                        ) from exc
+                    continue
+
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > self.max_response_bytes:
+                        raise WebsiteHTTPError(
+                            "Website response exceeds the configured size limit."
+                        )
+                response_headers = response.headers.copy()
+                for header in ("content-encoding", "content-length", "transfer-encoding"):
+                    response_headers.pop(header, None)
+                return httpx.Response(
+                    response.status_code,
+                    headers=response_headers,
+                    content=bytes(body),
+                    request=response.request,
+                )
+        raise WebsiteHTTPError("Website redirect handling failed.")
+
     async def _extract_social(self, url: str, platform: str) -> WebsiteContent:
         """Extract public social metadata; return explicit limitations when blocked."""
         timeout = httpx.Timeout(self.timeout_seconds)
@@ -255,72 +311,97 @@ class WebsiteExtractor:
         }
 
         if platform == "youtube":
-            oembed_url = "https://www.youtube.com/oembed?url=" + url + "&format=json"
-            await validate_resolved_url(oembed_url)
+            oembed_url = str(
+                httpx.URL("https://www.youtube.com/oembed")
+                .copy_add_param("url", url)
+                .copy_add_param("format", "json")
+            )
             data: dict[str, Any] = {}
+            title = ""
+            description = ""
+            source = "youtube_oembed"
             async with httpx.AsyncClient(transport=transport, timeout=timeout, trust_env=False) as client:
                 try:
-                    response = await client.get(oembed_url, headers=headers)
-                    response.raise_for_status()
-                    data = response.json()
-                except httpx.TimeoutException:
-                    data = {}
-                except httpx.HTTPStatusError:
+                    response = await self._request_public(client, oembed_url, headers)
+                    if response.status_code < 400:
+                        parsed = response.json()
+                        if isinstance(parsed, dict):
+                            data = parsed
+                except (httpx.TimeoutException, WebsiteHTTPError):
                     data = {}
                 except (httpx.HTTPError, json.JSONDecodeError, ValueError):
                     data = {}
 
                 if not data:
                     try:
-                        page = await client.get(url, headers=headers, follow_redirects=True)
+                        page = await self._request_public(client, url, headers)
                         if page.status_code >= 400:
-                            raise WebsiteHTTPError(f"YouTube returned HTTP {page.status_code}.")
+                            if page.status_code >= 500:
+                                raise WebsiteHTTPError(
+                                    f"YouTube returned HTTP {page.status_code} while fetching public metadata."
+                                )
+                            raise EmptyWebsiteContentError(
+                                f"YouTube returned HTTP {page.status_code}; public metadata is inaccessible."
+                            )
                         soup = BeautifulSoup(page.content, "html.parser")
                         public_metadata = _social_metadata(soup)
                         title = public_metadata.get("title", "")
                         description = public_metadata.get("description", "")
-                        if title:
-                            data = {
-                                "title": title,
-                                "author_name": title,
-                                "thumbnail_url": public_metadata.get("image_url", ""),
-                                "description": description,
-                            }
+                        source = "public_html"
                     except httpx.TimeoutException as exc:
                         raise WebsiteTimeoutError("YouTube metadata request timed out.") from exc
                     except httpx.HTTPError as exc:
                         raise WebsiteHTTPError("YouTube public metadata could not be reached.") from exc
-            title = _clean_text(str(data.get("title", "")))
+                    except WebsiteHTTPError:
+                        raise
+                    except UnsafeWebsiteURLError as exc:
+                        raise WebsiteHTTPError(
+                            "YouTube redirected to an unsafe network destination."
+                        ) from exc
+            title = _clean_text(str(data.get("title", ""))) or _clean_text(title)
             author = _clean_text(str(data.get("author_name", "")))
             if not title:
                 raise EmptyWebsiteContentError("YouTube returned no usable public metadata.")
+            content_type = _social_content_type(url, platform)
             limitations: list[str] = []
-            if "/channel/" in url or "/@" in url:
+            if content_type in {"profile", "channel_or_video"}:
                 limitations.append("Channel statistics, recent posts, and transcripts may require another authorized source.")
-            else:
+            elif content_type == "video":
                 limitations.append("Transcript availability and engagement statistics are not verified.")
+            else:
+                limitations.append("This is a YouTube landing page; channel-specific details were not retrieved.")
             return WebsiteContent(
                 url=url,
                 title=title,
-                meta_description=f"Public YouTube metadata for {title}"[:1000],
+                meta_description=_clean_text(description)[:1000],
                 headings=[title, author] if author else [title],
                 paragraphs=[f"Channel or uploader: {author}"] if author else [],
                 platform="youtube",
-                content_type="channel_or_video",
-                source="youtube_oembed",
+                content_type=content_type,
+                extraction_status=(
+                    "success"
+                    if description or (data and content_type == "video")
+                    else "limited"
+                ),
+                source=source,
                 limitations=limitations,
                 metadata={"author_name": author, "thumbnail_url": str(data.get("thumbnail_url", ""))},
             )
 
-        await validate_resolved_url(url)
-        async with httpx.AsyncClient(transport=transport, timeout=timeout, follow_redirects=True, trust_env=False) as client:
+        async with httpx.AsyncClient(transport=transport, timeout=timeout, trust_env=False) as client:
             try:
-                response = await client.get(url, headers=headers)
+                response = await self._request_public(client, url, headers)
             except httpx.TimeoutException as exc:
                 raise WebsiteTimeoutError("Social platform request timed out.") from exc
             except httpx.HTTPError as exc:
                 raise WebsiteHTTPError("Social platform could not be reached.") from exc
+            except UnsafeWebsiteURLError:
+                raise
 
+        if response.status_code >= 500:
+            raise WebsiteHTTPError(
+                f"The {platform} public page returned HTTP {response.status_code}."
+            )
         if response.status_code in {403, 429}:
             username = _platform_username(url, platform)
             return WebsiteContent(
@@ -329,7 +410,7 @@ class WebsiteExtractor:
                 meta_description="",
                 headings=[f"@{username}" if username and platform in {"instagram", "x"} else platform.title()],
                 platform=platform,
-                content_type="profile" if username else "public_post",
+                content_type=_social_content_type(url, platform),
                 extraction_status="limited",
                 source="public_html",
                 limitations=[f"The {platform} public page returned HTTP {response.status_code}; automated access was denied or rate limited."],
@@ -343,7 +424,7 @@ class WebsiteExtractor:
                 meta_description="",
                 headings=[f"@{username}" if username and platform in {"instagram", "x"} else platform.title()],
                 platform=platform,
-                content_type="profile" if username else "public_post",
+                content_type=_social_content_type(url, platform),
                 extraction_status="limited",
                 source="public_html",
                 limitations=[f"The {platform} public page returned HTTP {response.status_code}; the requested content may be private or inaccessible."],
@@ -366,6 +447,7 @@ class WebsiteExtractor:
         login_wall = bool(re.search(r'log in|login|sign up|password', html_text, re.IGNORECASE))
 
         source = "public_html"
+        fallback_limitations: list[str] = []
         if platform == "instagram" and (login_wall or not title or not description) and self.apify_api_token and self.apify_instagram_actor_id:
             apify_data = await self._extract_instagram_apify(url)
             if apify_data:
@@ -375,8 +457,12 @@ class WebsiteExtractor:
                 login_wall = False
                 metadata["scraper"] = "apify"
                 source = "apify"
+            else:
+                fallback_limitations.append(
+                    "The configured Instagram fallback did not return usable public profile data."
+                )
         username = _platform_username(url, platform)
-        limitations: list[str] = []
+        limitations: list[str] = fallback_limitations
 
         if platform == "instagram":
             limitations.append("Public HTML may omit profile bio, follower counts, and posts; login or bot protection can require another authorized source.")
@@ -388,7 +474,11 @@ class WebsiteExtractor:
         if login_wall:
             limitations.insert(0, f"The {platform} public page appears to contain a login or access restriction.")
             extraction_status = "limited"
-        elif title or description:
+        elif description or (
+            title
+            and title.casefold()
+            not in {platform.casefold(), f"{platform.title()} - log in or sign up".casefold()}
+        ):
             extraction_status = "success"
         else:
             extraction_status = "limited"
@@ -403,7 +493,7 @@ class WebsiteExtractor:
             headings=[_clean_text(fallback_title)] if fallback_title else [],
             paragraphs=[_clean_text(description)] if description else [],
             platform=platform,
-            content_type="profile" if username else "public_post",
+            content_type=_social_content_type(url, platform),
             extraction_status=extraction_status,
             source=source,
             limitations=limitations,
@@ -488,11 +578,47 @@ class WebsiteExtractor:
             relevant_links=links,
             service_descriptions=service_descriptions,
         )
-        if not any((result.title, result.meta_description, *result.headings, *result.paragraphs)):
+        evidence = " ".join(
+            [
+                result.title,
+                result.meta_description,
+                *result.headings,
+                *result.paragraphs,
+                *result.service_descriptions,
+            ]
+        ).strip()
+        if not evidence:
             raise EmptyWebsiteContentError("Website contained no readable business content.")
-        if len(result.to_prompt_text(self.max_content_chars).strip()) < 30:
+        if len(evidence) < 20:
             raise EmptyWebsiteContentError("Website contained too little useful content to analyze.")
         return result
+
+
+def _social_content_type(url: str, platform: str) -> str:
+    """Classify common profile, post, video, and homepage URL forms."""
+    parsed = urlsplit(url)
+    parts = [part.casefold() for part in parsed.path.split("/") if part]
+    if platform == "youtube":
+        if parsed.hostname == "youtu.be" or parsed.path.startswith(("/watch", "/shorts/")):
+            return "video"
+        if not parts:
+            return "homepage"
+        return "profile" if parts[0].startswith("@") or parts[0] in {"channel", "c", "user"} else "channel_or_video"
+    if platform == "instagram":
+        if not parts:
+            return "homepage"
+        if parts[0] in {"p", "reel", "reels", "tv", "stories"}:
+            return "public_post"
+        return "profile"
+    if platform == "x":
+        if not parts or parts[0] in {"home", "explore", "search", "i", "settings", "messages", "notifications"}:
+            return "homepage"
+        return "public_post" if "status" in parts else "profile"
+    if platform == "facebook":
+        if not parts:
+            return "homepage"
+        return "public_post" if parts[0] in {"posts", "videos", "watch", "photo"} else "profile"
+    return "page"
 
 
 def _detect_platform(url: str) -> str:
@@ -532,8 +658,18 @@ def _platform_username(url: str, platform: str) -> str:
     if not path_parts:
         return ""
     if platform == "youtube":
+        if urlsplit(url).hostname == "youtu.be" or path_parts[0] in {"watch", "shorts"}:
+            return ""
         return path_parts[-1]
-    if platform in {"instagram", "x", "facebook"}:
+    if platform == "instagram":
+        if path_parts[0] in {"p", "reel", "reels", "tv", "stories"}:
+            return ""
+        return path_parts[0]
+    if platform == "x":
+        return path_parts[0]
+    if platform == "facebook":
+        if path_parts[0] in {"posts", "videos", "watch", "photo"}:
+            return ""
         return path_parts[0]
     return ""
 

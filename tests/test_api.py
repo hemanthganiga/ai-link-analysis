@@ -2,11 +2,22 @@
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app, get_analysis_service
-from app.schemas import AnalysisResponse, Brand, BusinessAnalysis, CompetitorAnalysis, SEOImprovements, TargetAudience, SearchQuery, ServiceRecommendation, TokenUsage
 from app.config import Settings
+from app.main import app, get_analysis_service
+from app.schemas import (
+    AnalysisResponse,
+    Brand,
+    BusinessAnalysis,
+    CompetitorAnalysis,
+    SearchQuery,
+    SEOImprovements,
+    ServiceRecommendation,
+    TargetAudience,
+    TokenUsage,
+)
 from app.services.analysis_service import AnalysisService
 from app.services.llm_service import LLMProviderError
 from app.services.website_extractor import WebsiteContent, WebsiteTimeoutError
@@ -101,10 +112,66 @@ def test_post_returns_valid_five_section_response() -> None:
     assert AnalysisResponse.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.instagram.com/crestspot",
+        "https://www.youtube.com/",
+        "https://www.facebook.com/",
+        "https://x.com/",
+        "https://www.google.com/",
+    ],
+)
+def test_supported_platform_urls_pass_api_request_validation(url: str) -> None:
+    response = client.post("/link-analysis", json={"url": url})
+    assert response.status_code == 200
+    assert response.json()["website"] == url
+
+
 def test_invalid_and_missing_urls_are_rejected() -> None:
     assert client.post("/link-analysis", json={"url": "ftp://example.com"}).status_code == 422
     assert client.post("/link-analysis", json={}).status_code == 422
     assert client.post("/link-analysis", json={"url": "http://127.0.0.1"}).status_code == 422
+
+
+def test_blocked_social_profile_returns_explanation_instead_of_analysis() -> None:
+    class LimitedExtractor:
+        async def extract(self, url: str) -> WebsiteContent:
+            return WebsiteContent(
+                url=url,
+                title="@crestspot",
+                meta_description="",
+                platform="instagram",
+                content_type="profile",
+                extraction_status="limited",
+                limitations=["The public page returned HTTP 403."],
+            )
+
+    class MustNotAnalyze:
+        async def analyze(self, _: str) -> object:
+            raise AssertionError("LLM must not run without public profile content")
+
+    service = AnalysisService(
+        Settings(
+            llm_provider="groq",
+            llm_model="openai/gpt-oss-20b",
+            llm_api_key="test-key",
+        ),
+        extractor=LimitedExtractor(),
+        llm_service=MustNotAnalyze(),  # type: ignore[arg-type]
+    )
+    app.dependency_overrides[get_analysis_service] = lambda: service
+    try:
+        response = client.post(
+            "/link-analysis",
+            json={"url": "https://www.instagram.com/crestspot"},
+        )
+    finally:
+        app.dependency_overrides[get_analysis_service] = lambda: FakeAnalysisService()
+
+    assert response.status_code == 422
+    assert "No usable public content" in response.json()["detail"]
+    assert "HTTP 403" in response.json()["detail"]
 
 
 def test_timeout_provider_failure_and_unexpected_errors_are_explicit() -> None:

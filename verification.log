@@ -1,24 +1,43 @@
-Verification run: 2026-11-19
-Python: 3.12.7
+Verification run: 2026-11-20
 
-Command:
+Automated checks:
   python -m pytest -q
-Result:
-  37 passed, 1 warning in 1.23s
-  Warning: StarletteDeprecationWarning from the installed Starlette TestClient integration.
+  Result: 60 passed, 1 Starlette TestClient deprecation warning.
 
-Command:
   python -m compileall -q app tests
-Result:
-  Exit code 0
+  Result: passed.
 
-Local Uvicorn smoke test:
-  GET /                         200 (status=ok)
-  GET /health                   200 (status=healthy)
-  GET /docs                     200
-  POST /link-analysis with a private loopback URL
-                                422 (blocked by request validation)
+Local API checks:
+  GET /health       200
+  GET /docs         200
+  GET /openapi.json 200; /link-analysis is present.
 
-No live LLM request was made. No API key was configured. The local outbound
-website-fetch attempt could not complete because direct TLS verification in the
-workspace failed with CERTIFICATE_VERIFY_FAILED; see the README limitations.
+Actual local URL requests:
+  Instagram https://www.instagram.com/crestspot
+    422: public HTML exposed a login restriction and no usable profile description.
+  YouTube https://www.youtube.com/
+    422: landing-page title only; no channel-specific content was retrieved.
+  Facebook https://www.facebook.com/
+    422: upstream returned HTTP 400; page was inaccessible.
+  X https://x.com/
+    200: public homepage metadata was analyzed; extraction is marked limited.
+  Website https://www.google.com/
+    200 with successful extraction and LLM analysis on the first request.
+    A burst of later requests received Groq HTTP 429 and correctly returned
+    API 502; a subsequent retry returned 200 with analysis output.
+  Invalid URL
+    422: request validation rejected the value.
+  Unresolvable host
+    400: host could not be resolved safely.
+
+Deployment check:
+  Existing Render /health and /docs returned 200.
+  Before these local changes, the deployed Instagram request returned 200
+  with extraction_status=limited and a login/access restriction, but still
+  generated an analysis. The deployed service has not been redeployed with
+  these changes.
+
+Configuration:
+  Local LLM_PROVIDER=groq and LLM_MODEL=openai/gpt-oss-20b.
+  An API key is configured locally; its value is not recorded here.
+  No local Apify Instagram fallback credentials are configured.

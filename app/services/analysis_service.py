@@ -12,23 +12,20 @@ from app.config import Settings
 from app.schemas import (
     AnalysisResponse,
     Brand,
-    BusinessAnalysis,
-    CompetitorAnalysis,
     ExtractionInfo,
-    SearchQuery,
-    SEOImprovements,
-    ServiceRecommendation,
-    TargetAudience,
     TokenUsage,
 )
 from app.services.competitor_service import build_analysis_prompt
 from app.services.llm_service import (
     LLMConfigurationError,
-    LLMProviderError,
     LLMService,
     create_provider,
 )
-from app.services.website_extractor import WebsiteContent, WebsiteExtractor
+from app.services.website_extractor import (
+    EmptyWebsiteContentError,
+    WebsiteContent,
+    WebsiteExtractor,
+)
 
 
 @dataclass
@@ -71,6 +68,22 @@ class AnalysisService:
                 f"{key_name} is required. Add the selected provider's API key to the environment."
             )
         content = await self.extractor.extract(url)
+        if content.platform != "website":
+            source_text = " ".join(
+                [
+                    content.meta_description,
+                    *content.paragraphs,
+                    *content.service_descriptions,
+                ]
+            ).strip()
+            if len(source_text) < 20:
+                limitation = " ".join(content.limitations)
+                detail = (
+                    f"No usable public content was retrieved from {content.platform}."
+                    if not limitation
+                    else f"No usable public content was retrieved from {content.platform}. {limitation}"
+                )
+                raise EmptyWebsiteContentError(detail)
         prompt = build_analysis_prompt(content, self.settings.max_content_chars)
         cache_key = hashlib.sha256(
             f"{self.settings.llm_provider}:{self.settings.llm_model}:{url}:{prompt}".encode()
@@ -83,13 +96,7 @@ class AnalysisService:
                     update={"usage": cached.usage.model_copy(update={"cache_hit": True})}
                 )
 
-        try:
-            analysis, usage = await self.llm_service.analyze(prompt)
-        except LLMProviderError as exc:
-            if "429" not in str(exc) and "rate" not in str(exc).lower():
-                raise
-            analysis = _degraded_social_analysis(content) if content.platform != "website" else _degraded_website_analysis(content)
-            usage = {"input_tokens": None, "output_tokens": None, "total_tokens": None}
+        analysis, usage = await self.llm_service.analyze(prompt)
         name, category, summary = _brand_details(content, analysis.competitor_analysis.industry)
         response = AnalysisResponse(
             website=url,
@@ -134,90 +141,6 @@ class AnalysisService:
         self._cache.move_to_end(key)
         while len(self._cache) > self.settings.cache_max_entries:
             self._cache.popitem(last=False)
-
-
-def _degraded_social_analysis(content: WebsiteContent) -> BusinessAnalysis:
-    """Create an explicitly limited, evidence-safe response during provider outages."""
-    username = content.metadata.get("username", "").strip()
-    identity = f"@{username}" if username else content.platform.title()
-    limitations = "; ".join(content.limitations) or "The public source did not provide enough profile content."
-    competitor = CompetitorAnalysis(
-        brand_overview=f"Limited public metadata is available for {identity}; detailed brand facts could not be verified.",
-        industry="Unknown",
-        brand_strengths=[],
-        opportunities=["Add a public bio, products, or services to the profile"],
-        research_limitations=f"AI analysis was unavailable due to provider rate limiting. {limitations}",
-    )
-    platforms = ["Google", "Facebook", "Instagram", "LinkedIn", "X"]
-    queries = [
-        SearchQuery(
-            query=f"{identity} official profile {platform}",
-            platforms=[platform],
-            intent="Brand discovery",
-            business_relevance="Unverified brand and presence discovery",
-            target_audience="People seeking the official profile",
-        )
-        for platform in platforms
-    ]
-    return BusinessAnalysis(
-        competitor_analysis=competitor,
-        target_search_queries=queries,
-        seo_improvements=SEOImprovements(
-            primary_keyword=identity,
-            meta_description=f"Official profile for {identity}",
-            secondary_keywords=[],
-            long_tail_keywords=[],
-            recommended_title=f"{identity} | Official Profile",
-        ),
-        top_services=[
-            ServiceRecommendation(
-                service_name="Verify public profile",
-                description="Confirm the official profile, public bio, and offered services from authoritative sources.",
-                target_industry="Unknown",
-                target_customer="Potential customers",
-                main_benefit="Prevents unsupported brand assumptions",
-                source_status="recommended",
-            )
-            for _ in range(5)
-        ],
-        target_audience=TargetAudience(
-            primary_audience=["Potential customers"],
-            secondary_audience=[],
-            industries=[],
-            customer_profiles=[],
-            customer_pain_points=[],
-            customer_interests=[],
-            geographic_markets=[],
-            potential_requirements=[],
-        ),
-    )
-
-
-def _degraded_website_analysis(content: WebsiteContent) -> BusinessAnalysis:
-    """Create a minimal evidence-safe fallback for non-social pages during provider outages."""
-    identity = content.title or content.url
-    competitor = CompetitorAnalysis(
-        brand_overview=f"Public metadata was extracted for {identity}, but AI analysis was unavailable.",
-        industry="Unknown",
-        brand_strengths=[],
-        opportunities=["Retry analysis when the LLM provider is available"],
-        research_limitations="Provider rate limiting prevented complete AI analysis.",
-    )
-    platforms = ["Google", "Facebook", "Instagram", "LinkedIn", "X"]
-    queries = [
-        SearchQuery(query=f"{identity} official information", platforms=[platform], intent="Brand discovery", business_relevance="Official source discovery", target_audience="Potential customers")
-        for platform in platforms
-    ]
-    return BusinessAnalysis(
-        competitor_analysis=competitor,
-        target_search_queries=queries,
-        seo_improvements=SEOImprovements(primary_keyword=identity[:200], meta_description=content.meta_description[:500], recommended_title=identity[:200]),
-        top_services=[
-            ServiceRecommendation(service_name="Verify official offerings", description="Confirm the organization's real services from authoritative page evidence.", target_industry="Unknown", target_customer="Potential customers", main_benefit="Avoid unsupported recommendations", source_status="recommended")
-            for _ in range(5)
-        ],
-        target_audience=TargetAudience(primary_audience=["Potential customers"], secondary_audience=[], industries=[], customer_profiles=[], customer_pain_points=[], customer_interests=[], geographic_markets=[], potential_requirements=[]),
-    )
 
 
 def _brand_details(content: WebsiteContent, industry: str) -> tuple[str, str, str]:

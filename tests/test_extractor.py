@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -77,7 +78,8 @@ async def test_youtube_channel_falls_back_to_public_html_metadata() -> None:
 
     assert result.platform == "youtube"
     assert result.title == "YouTube"
-    assert result.source == "youtube_oembed"
+    assert result.source == "public_html"
+    assert result.extraction_status == "success"
 
 
 @pytest.mark.asyncio
@@ -118,6 +120,71 @@ async def test_social_http_status_is_exposed() -> None:
     assert result.platform == "instagram"
     assert result.extraction_status == "limited"
     assert "403" in result.limitations[0]
+
+
+@pytest.mark.asyncio
+async def test_social_redirect_to_private_host_is_rejected() -> None:
+    requested_urls: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested_urls.append(str(request.url))
+        return httpx.Response(302, headers={"location": "http://127.0.0.1/admin"})
+
+    extractor = WebsiteExtractor(transport=httpx.MockTransport(handler))
+    safe_dns = AsyncMock(return_value=("instagram.com", 443, ["31.13.65.36"]))
+    with patch("app.services.website_extractor.validate_resolved_url", new=safe_dns):
+        with pytest.raises(WebsiteHTTPError, match="invalid or unsafe URL"):
+            await extractor.extract("https://www.instagram.com/crestspot")
+
+    assert requested_urls == ["https://www.instagram.com/crestspot"]
+    safe_dns.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_social_response_size_limit_is_enforced() -> None:
+    extractor = WebsiteExtractor(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                headers={"content-type": "text/html"},
+                content=b"x" * 512,
+            )
+        ),
+        max_response_bytes=100,
+    )
+    with patch(
+        "app.services.website_extractor.validate_resolved_url",
+        new=AsyncMock(return_value=("instagram.com", 443, ["31.13.65.36"])),
+    ):
+        with pytest.raises(WebsiteHTTPError, match="size limit"):
+            await extractor.extract("https://www.instagram.com/crestspot")
+
+
+@pytest.mark.asyncio
+async def test_social_gzip_response_is_decoded_once() -> None:
+    html = (
+        b"<html><head><title>CrestSpot</title>"
+        b"<meta property='og:description' content='CrestSpot is an independent creative studio for growing brands.'>"
+        b"</head></html>"
+    )
+    extractor = WebsiteExtractor(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                headers={"content-type": "text/html", "content-encoding": "gzip"},
+                content=gzip.compress(html),
+            )
+        )
+    )
+    with patch(
+        "app.services.website_extractor.validate_resolved_url",
+        new=AsyncMock(return_value=("instagram.com", 443, ["31.13.65.36"])),
+    ):
+        result = await extractor.extract("https://www.instagram.com/crestspot")
+
+    assert result.title == "CrestSpot"
+    assert "independent creative studio" in result.meta_description
+    assert result.extraction_status == "success"
 
 
 def test_valid_http_and_https_urls_are_accepted() -> None:
@@ -195,6 +262,11 @@ def test_empty_or_invalid_html_is_reported() -> None:
         extractor.parse_html(b"<html><body><script>code()</script></body></html>", "https://example.com")
     content = extractor.parse_html(b"not valid html <p>Readable company information.</p>", "https://example.com")
     assert content.paragraphs == ["Readable company information."]
+
+
+def test_title_only_site_is_not_treated_as_usable_content() -> None:
+    with pytest.raises(EmptyWebsiteContentError, match="too little useful content"):
+        WebsiteExtractor().parse_html(b"<html><title>Acme</title></html>", "https://example.com")
 
 
 @pytest.mark.asyncio

@@ -87,8 +87,9 @@ Other environment settings:
 - Instagram profiles use public HTML metadata and report login/bot/access restrictions explicitly. An optional Apify actor can provide richer public profile data when `APIFY_API_TOKEN` and `APIFY_INSTAGRAM_ACTOR_ID` are configured.
 - YouTube channels, videos, and Shorts use the public YouTube oEmbed metadata endpoint.
 - Facebook pages/posts and X/Twitter profiles/posts use public HTML metadata when accessible; login walls and blocks are reported.
+- Social-page redirects and response-size limits are checked just like ordinary website requests. If a platform blocks access and provides no substantive public content, the API reports that limitation instead of generating analysis from a username or platform title.
 - Social extraction does not infer followers, engagement, post counts, or products unless public source evidence supports them.
-- If Groq is rate-limited or unavailable, social and website requests return an explicitly labeled evidence-safe degraded analysis rather than invented brand facts.
+- If an LLM provider is rate-limited or unavailable, the API returns an upstream-provider error; it does not fabricate a replacement analysis.
 
 ## Run locally
 
@@ -269,6 +270,8 @@ The response schema requires exactly five search queries and five service entrie
 - `503`: missing or unsupported provider configuration
 - `504`: website timeout
 - `500`: unexpected internal error (details are logged server-side)
+
+A blocked or login-gated social page with no substantive public metadata returns `422` with an explanation. The response is not a successful analysis unless usable source content was retrieved and analyzed by the configured LLM.
 
 ## LLM provider comparison and cost
 
