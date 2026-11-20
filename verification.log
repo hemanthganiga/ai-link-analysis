@@ -1,51 +1,57 @@
-Verification run: 2026-11-20
+Final verification run: 2026-11-20
 
-Automated checks for the current local changes:
+Code revision tested and deployed: 6dc385b
+
+Automated checks:
   python -m pytest -q
-  Result: 66 passed, 1 Starlette TestClient deprecation warning.
+  Result: 67 passed, 1 Starlette TestClient deprecation warning.
 
-  python -m compileall -q app tests
-  Result: passed.
+  python -m compileall app tests
+  Result: passed on the final code revision.
+
+  python -m compileall .
+  Result: passed during the deployment review.
 
   git diff --check
   Result: passed.
 
-  Pylance workspace diagnostics
-  Result: no errors; only existing warnings in application/tests.
-
-Local API documentation checks:
+Local Swagger/OpenAPI checks:
   GET /health       200
   GET /docs         200
-  GET /openapi.json 200; POST /link-analysis is present and includes
-  the ExtractedContent response schema.
+  GET /openapi.json 200; POST /link-analysis is present and includes the
+  ExtractedContent response schema.
 
-Actual live-source extraction checks using the current local code (no model
-analysis was run in these extraction-only requests):
+Live Render deployment:
+  Dashboard showed commit 6dc385b as Live/Deployed.
+  GET /health       200
+  GET /docs         200
+  GET /openapi.json 200; ExtractedContent schema present.
+
+Live POST tests on 6dc385b:
   Instagram https://www.instagram.com/crestspot
-    limited: public HTML exposed a login/access restriction; no bio or posts.
+    422, limited: login/access restriction; no profile text; analysis is null.
   YouTube https://www.youtube.com/watch?v=aqz-KE-bpKQ
-    limited: public oEmbed title/uploader/thumbnail only; no transcript or
-    engagement data.
+    200, limited: oEmbed title/uploader/thumbnail only; no transcript or
+    engagement data. Analysis is metadata-limited; industry is Unknown,
+    competitors/audience are empty, and services are labeled recommended.
   X https://x.com/jack/status/20
-    limited: extracted "just setting up my twttr"; profile information
-    unavailable; handle is explicitly URL-derived.
+    200, limited: extracted post text "just setting up my twttr"; handle is
+    URL-derived; profile bio and account statistics unavailable. Analysis is
+    limited to the post, with Unknown industry and no competitors/audience.
   Facebook https://www.facebook.com/NationalGeographic
-    limited: HTTP 400; no page content presented as extracted.
+    422, limited: upstream HTTP 400; no page content; analysis is null.
   Website https://www.python.org/
-    success: title, description, and page paragraphs extracted.
+    200, success: title, description, headings, and page text retrieved.
+    Analysis summary and observed services correspond to that page content.
+    Geographic markets not stated in the page were removed. The competitor
+    entry is marked as an AI-generated suggestion, not independently verified.
 
-Previously verified deployed end-to-end results (deployed code predates the
-current local response/sanitization changes):
-  Instagram: 422 due to login/access restriction.
-  YouTube video: 200 from oEmbed metadata; transcript/engagement unavailable.
-  X post: 200 with post text; profile information restricted.
-  Facebook: 422 after upstream HTTP 400.
-  Python.org: 200 with HTML extraction and analysis.
+Provider note:
+  One initial Python.org request returned 502 because Groq returned HTTP 429.
+  A spaced retry returned 200. No secret values are recorded here.
 
-Deployment/configuration:
-  Render uses FastAPI/Uvicorn and Python 3.12.7.
+Deployment configuration:
+  Render uses FastAPI/Uvicorn, Python 3.12.7, requirements.txt, and /health.
   LLM_PROVIDER=groq; LLM_MODEL=openai/gpt-oss-20b; GROQ_API_KEY is configured
-  as a secret environment variable (the value is not recorded here).
+  as a secret environment variable.
   No authorized Meta Graph API integration is configured.
-  The current local changes are not deployed; the live service still requires
-  deployment and post-deployment verification before HR resubmission.
