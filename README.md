@@ -8,6 +8,7 @@ FastAPI service that accepts a user-supplied public company website, extracts us
 
 - `POST /link-analysis` accepts any syntactically valid public HTTP(S) website.
 - Extracts title, meta description, headings, paragraphs, useful same-site links, and service/product descriptions.
+- Successful analysis responses return the bounded extracted content alongside its source, status, and limitations. Insufficient-content responses include the retrieved content and limitations with `analysis: null`.
 - DNS/IP and redirect checks, DNS-pinned outbound connections, private-address blocking, response-size limits, and bounded timeouts.
 - Five typed analysis sections with Pydantic response validation.
 - Groq, OpenAI, Google Gemini, and Anthropic adapters, selectable through environment variables.
@@ -85,8 +86,9 @@ Other environment settings:
 
 - Ordinary HTTP(S) websites use secure HTTPX and BeautifulSoup extraction.
 - Instagram profiles use public HTML metadata and report login/bot/access restrictions explicitly. An optional Apify actor can provide richer public profile data when `APIFY_API_TOKEN` and `APIFY_INSTAGRAM_ACTOR_ID` are configured.
-- YouTube channels, videos, and Shorts use the public YouTube oEmbed metadata endpoint.
-- Facebook pages/posts and X/Twitter profiles/posts use public HTML metadata when accessible; login walls and blocks are reported.
+- YouTube videos use public oEmbed metadata (title, uploader, and thumbnail). Video/audio content and transcripts are not retrieved; metadata-only analyses are marked limited and do not assert an industry, audience, or competitors.
+- Facebook pages/posts and X/Twitter profiles/posts use public HTML metadata when accessible. X post text is represented separately from URL-derived handles and profile information; login walls and blocks are reported.
+- Facebook HTTP 4xx responses are reported as limited extraction rather than treated as page content; upstream 5xx errors remain explicit gateway failures. No login, bot-protection, or undocumented endpoint bypass is attempted; a supported Meta Graph API integration would require authorized app credentials and permissions.
 - Social-page redirects and response-size limits are checked just like ordinary website requests. If a platform blocks access and provides no substantive public content, the API reports that limitation instead of generating analysis from a username or platform title.
 - Social extraction does not infer followers, engagement, post counts, or products unless public source evidence supports them.
 - If an LLM provider is rate-limited or unavailable, the API returns an upstream-provider error; it does not fabricate a replacement analysis.

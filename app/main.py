@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import Settings
 from app.schemas import AnalysisRequest, AnalysisResponse
-from app.services.analysis_service import AnalysisService
+from app.services.analysis_service import AnalysisService, build_extraction_info
 from app.services.llm_service import (
     LLMConfigurationError,
     LLMInvalidResponseError,
@@ -73,7 +73,26 @@ async def website_error_handler(_: Request, exc: WebsiteHTTPError) -> JSONRespon
 
 @app.exception_handler(EmptyWebsiteContentError)
 async def empty_content_handler(_: Request, exc: EmptyWebsiteContentError) -> JSONResponse:
-    return JSONResponse(status_code=422, content={"detail": str(exc)})
+    content = exc.content
+    extraction = (
+        build_extraction_info(
+            content,
+            extraction_status="limited",
+            error_detail=str(exc),
+        ).model_dump(mode="json")
+        if content is not None
+        else None
+    )
+    return JSONResponse(
+        status_code=422,
+        content={
+            "success": False,
+            "website": content.url if content is not None else None,
+            "detail": str(exc),
+            "extraction": extraction,
+            "analysis": None,
+        },
+    )
 
 
 @app.exception_handler(LLMConfigurationError)

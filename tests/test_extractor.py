@@ -83,6 +83,37 @@ async def test_youtube_channel_falls_back_to_public_html_metadata() -> None:
 
 
 @pytest.mark.asyncio
+async def test_youtube_video_uses_oembed_metadata_and_discloses_missing_transcript() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/oembed"
+        return httpx.Response(
+            200,
+            json={
+                "title": "A public demonstration video",
+                "author_name": "Example Channel",
+                "thumbnail_url": "https://i.ytimg.com/vi/example/default.jpg",
+            },
+        )
+
+    extractor = WebsiteExtractor(transport=httpx.MockTransport(handler))
+    with patch(
+        "app.services.website_extractor.validate_resolved_url",
+        new=AsyncMock(return_value=("youtube.com", 443, ["142.250.1.1"])),
+    ):
+        result = await extractor.extract(
+            "https://www.youtube.com/watch?v=aqz-KE-bpKQ"
+        )
+
+    assert result.title == "A public demonstration video"
+    assert result.metadata["author_name"] == "Example Channel"
+    assert result.headings == ["A public demonstration video"]
+    assert result.paragraphs == []
+    assert result.content_type == "video"
+    assert result.extraction_status == "limited"
+    assert any("transcript were not retrieved" in item for item in result.limitations)
+
+
+@pytest.mark.asyncio
 async def test_instagram_apify_fallback_is_used_when_configured() -> None:
     html_transport = httpx.MockTransport(
         lambda _: httpx.Response(
@@ -120,6 +151,61 @@ async def test_social_http_status_is_exposed() -> None:
     assert result.platform == "instagram"
     assert result.extraction_status == "limited"
     assert "403" in result.limitations[0]
+
+
+@pytest.mark.asyncio
+async def test_x_post_text_is_separate_from_url_derived_profile_handle() -> None:
+    html = (
+        b"<html><head><meta property='og:title' content='Post by jack'>"
+        b"<meta property='og:description' content='just setting up my twttr'></head>"
+        b"<body>Log in to X</body></html>"
+    )
+    extractor = WebsiteExtractor(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(
+                200, headers={"content-type": "text/html"}, content=html
+            )
+        )
+    )
+    with patch(
+        "app.services.website_extractor.validate_resolved_url",
+        new=AsyncMock(return_value=("x.com", 443, ["104.244.42.1"])),
+    ):
+        result = await extractor.extract("https://x.com/jack/status/20")
+
+    assert result.content_type == "public_post"
+    assert result.meta_description == "just setting up my twttr"
+    assert result.paragraphs == ["just setting up my twttr"]
+    assert result.metadata["username"] == "jack"
+    assert result.metadata["username_source"] == "submitted_url_path"
+    assert result.extraction_status == "limited"
+    assert any("profile bio" in item for item in result.limitations)
+
+
+@pytest.mark.asyncio
+async def test_facebook_http_400_is_limited_without_fabricated_page_content() -> None:
+    extractor = WebsiteExtractor(
+        transport=httpx.MockTransport(lambda _: httpx.Response(400))
+    )
+    with patch(
+        "app.services.website_extractor.validate_resolved_url",
+        new=AsyncMock(return_value=("facebook.com", 443, ["157.240.1.35"])),
+    ):
+        result = await extractor.extract(
+            "https://www.facebook.com/NationalGeographic"
+        )
+
+    assert result.platform == "facebook"
+    assert result.content_type == "profile"
+    assert result.title == ""
+    assert result.meta_description == ""
+    assert result.paragraphs == []
+    assert result.extraction_status == "limited"
+    assert result.metadata == {
+        "requested_handle": "NationalGeographic",
+        "requested_handle_source": "submitted_url_path",
+    }
+    assert "HTTP 400" in result.limitations[0]
 
 
 @pytest.mark.asyncio

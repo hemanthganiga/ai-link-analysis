@@ -1,43 +1,51 @@
 Verification run: 2026-11-20
 
-Automated checks:
+Automated checks for the current local changes:
   python -m pytest -q
-  Result: 60 passed, 1 Starlette TestClient deprecation warning.
+  Result: 66 passed, 1 Starlette TestClient deprecation warning.
 
   python -m compileall -q app tests
   Result: passed.
 
-Local API checks:
+  git diff --check
+  Result: passed.
+
+  Pylance workspace diagnostics
+  Result: no errors; only existing warnings in application/tests.
+
+Local API documentation checks:
   GET /health       200
   GET /docs         200
-  GET /openapi.json 200; /link-analysis is present.
+  GET /openapi.json 200; POST /link-analysis is present and includes
+  the ExtractedContent response schema.
 
-Actual local URL requests:
+Actual live-source extraction checks using the current local code (no model
+analysis was run in these extraction-only requests):
   Instagram https://www.instagram.com/crestspot
-    422: public HTML exposed a login restriction and no usable profile description.
-  YouTube https://www.youtube.com/
-    422: landing-page title only; no channel-specific content was retrieved.
-  Facebook https://www.facebook.com/
-    422: upstream returned HTTP 400; page was inaccessible.
-  X https://x.com/
-    200: public homepage metadata was analyzed; extraction is marked limited.
-  Website https://www.google.com/
-    200 with successful extraction and LLM analysis on the first request.
-    A burst of later requests received Groq HTTP 429 and correctly returned
-    API 502; a subsequent retry returned 200 with analysis output.
-  Invalid URL
-    422: request validation rejected the value.
-  Unresolvable host
-    400: host could not be resolved safely.
+    limited: public HTML exposed a login/access restriction; no bio or posts.
+  YouTube https://www.youtube.com/watch?v=aqz-KE-bpKQ
+    limited: public oEmbed title/uploader/thumbnail only; no transcript or
+    engagement data.
+  X https://x.com/jack/status/20
+    limited: extracted "just setting up my twttr"; profile information
+    unavailable; handle is explicitly URL-derived.
+  Facebook https://www.facebook.com/NationalGeographic
+    limited: HTTP 400; no page content presented as extracted.
+  Website https://www.python.org/
+    success: title, description, and page paragraphs extracted.
 
-Deployment check:
-  Existing Render /health and /docs returned 200.
-  Before these local changes, the deployed Instagram request returned 200
-  with extraction_status=limited and a login/access restriction, but still
-  generated an analysis. The deployed service has not been redeployed with
-  these changes.
+Previously verified deployed end-to-end results (deployed code predates the
+current local response/sanitization changes):
+  Instagram: 422 due to login/access restriction.
+  YouTube video: 200 from oEmbed metadata; transcript/engagement unavailable.
+  X post: 200 with post text; profile information restricted.
+  Facebook: 422 after upstream HTTP 400.
+  Python.org: 200 with HTML extraction and analysis.
 
-Configuration:
-  Local LLM_PROVIDER=groq and LLM_MODEL=openai/gpt-oss-20b.
-  An API key is configured locally; its value is not recorded here.
-  No local Apify Instagram fallback credentials are configured.
+Deployment/configuration:
+  Render uses FastAPI/Uvicorn and Python 3.12.7.
+  LLM_PROVIDER=groq; LLM_MODEL=openai/gpt-oss-20b; GROQ_API_KEY is configured
+  as a secret environment variable (the value is not recorded here).
+  No authorized Meta Graph API integration is configured.
+  The current local changes are not deployed; the live service still requires
+  deployment and post-deployment verification before HR resubmission.

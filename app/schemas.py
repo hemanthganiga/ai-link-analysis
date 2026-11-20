@@ -9,6 +9,17 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.utils.validators import validate_url_syntax
 
 
+class ExtractedContent(BaseModel):
+    """Content and metadata actually retrieved from the submitted page."""
+
+    title: str = ""
+    meta_description: str = ""
+    headings: list[str] = Field(default_factory=list)
+    paragraphs: list[str] = Field(default_factory=list)
+    service_descriptions: list[str] = Field(default_factory=list)
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
 class ExtractionInfo(BaseModel):
     """Normalized source metadata and extraction limitations."""
 
@@ -17,6 +28,7 @@ class ExtractionInfo(BaseModel):
     extraction_status: Literal["success", "limited"]
     source: str
     limitations: list[str] = Field(default_factory=list)
+    content: ExtractedContent = Field(default_factory=ExtractedContent)
 
 
 class AnalysisRequest(BaseModel):

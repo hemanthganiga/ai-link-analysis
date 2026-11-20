@@ -139,12 +139,16 @@ def test_blocked_social_profile_returns_explanation_instead_of_analysis() -> Non
         async def extract(self, url: str) -> WebsiteContent:
             return WebsiteContent(
                 url=url,
-                title="@crestspot",
+                title="",
                 meta_description="",
                 platform="instagram",
                 content_type="profile",
                 extraction_status="limited",
                 limitations=["The public page returned HTTP 403."],
+                metadata={
+                    "requested_handle": "crestspot",
+                    "requested_handle_source": "submitted_url_path",
+                },
             )
 
     class MustNotAnalyze:
@@ -170,8 +174,15 @@ def test_blocked_social_profile_returns_explanation_instead_of_analysis() -> Non
         app.dependency_overrides[get_analysis_service] = lambda: FakeAnalysisService()
 
     assert response.status_code == 422
-    assert "No usable public content" in response.json()["detail"]
-    assert "HTTP 403" in response.json()["detail"]
+    payload = response.json()
+    assert payload["success"] is False
+    assert payload["website"] == "https://www.instagram.com/crestspot"
+    assert "No usable public content" in payload["detail"]
+    assert payload["analysis"] is None
+    assert payload["extraction"]["extraction_status"] == "limited"
+    assert payload["extraction"]["content"]["title"] == ""
+    assert payload["extraction"]["content"]["metadata"]["requested_handle"] == "crestspot"
+    assert "HTTP 403" in payload["detail"]
 
 
 def test_timeout_provider_failure_and_unexpected_errors_are_explicit() -> None:

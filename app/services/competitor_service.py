@@ -11,15 +11,28 @@ from app.services.website_extractor import WebsiteContent
 def build_analysis_prompt(content: WebsiteContent, max_content_chars: int = 18_000) -> str:
     """Build a bounded analysis prompt that separates source evidence from inference."""
     schema = json.dumps(BusinessAnalysis.model_json_schema(), separators=(",", ":"))
-    social_guidance = ""
+    social_guidance: list[str] = []
     if content.platform != "website":
-        social_guidance = (
+        social_guidance.append(
             "- This source is a social media profile or public post, not necessarily a corporate website. "
-            "Analyze brand identity, bio, category, content themes, audience, positioning, social opportunities, "
-            "and marketing recommendations. Do not infer products, followers, engagement, post counts, or location "
-            "unless the supplied evidence explicitly supports them. State missing information clearly.\n"
+            "Analyze only facts directly present in the supplied metadata or text. Do not infer products, "
+            "followers, engagement, post counts, location, profile details, industry, or audience. Use Unknown "
+            "and empty lists when the evidence does not establish them. Label ideas as recommendations."
         )
-    return (
+    if content.platform == "youtube" and content.content_type == "video":
+        social_guidance.append(
+            "- This is a YouTube video URL. No video, audio, captions, or transcript was retrieved. If the "
+            "source is youtube_oembed, the only evidence is its title, uploader, and thumbnail metadata. Do not "
+            "describe the video, infer its subject or the uploader's business from its title, or claim transcript "
+            "or engagement information."
+        )
+    if content.platform == "x" and content.content_type == "public_post":
+        social_guidance.append(
+            "- This is an X public-post URL, not a profile URL. Treat any extracted description as post text. "
+            "Do not present the post author handle as a verified profile name, and do not infer a biography, "
+            "services, followers, audience, or account statistics."
+        )
+    prompt_prefix = (
         "Analyze the submitted website or social profile for a business owner. Return one JSON object that "
         "strictly follows the supplied JSON Schema, with no markdown or extra keys.\n\n"
         "Evidence and honesty rules:\n"
@@ -41,7 +54,29 @@ def build_analysis_prompt(content: WebsiteContent, max_content_chars: int = 18_0
         "queries, cover Google, Facebook, Instagram, LinkedIn, and X; prefer one platform "
         "per query, in that order. Include a platform-specific query for each.\n"
         "- Do not claim real-time search rankings, volumes, or research that was not run.\n"
-        f"{social_guidance}\n"
-        f"JSON Schema:\n{schema}\n\n"
-        f"Website content:\n{content.to_prompt_text(max_content_chars)}"
+    )
+    if social_guidance:
+        prompt_prefix += (
+            "Platform-specific evidence rules:\n"
+            + "\n".join(social_guidance)
+            + "\n\n"
+        )
+    if content.platform == "x" and content.content_type == "public_post":
+        post_text = "\n".join(content.paragraphs).strip() or content.meta_description
+        evidence = (
+            "Platform: x\n"
+            "Content type: public_post\n"
+            "Extraction status: "
+            f"{content.extraction_status}\n"
+            "Limitations:\n"
+            + "\n".join(f"- {item}" for item in content.limitations)
+            + "\n\nPost text:\n"
+            + post_text[:max_content_chars]
+        )
+    else:
+        evidence = content.to_prompt_text(max_content_chars)
+    return (
+        prompt_prefix
+        + f"JSON Schema:\n{schema}\n\n"
+        + f"Source evidence:\n{evidence}"
     )

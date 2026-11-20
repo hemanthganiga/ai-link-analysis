@@ -12,7 +12,10 @@ from app.config import Settings
 from app.schemas import (
     AnalysisResponse,
     Brand,
+    BusinessAnalysis,
+    ExtractedContent,
     ExtractionInfo,
+    TargetAudience,
     TokenUsage,
 )
 from app.services.competitor_service import build_analysis_prompt
@@ -69,13 +72,22 @@ class AnalysisService:
             )
         content = await self.extractor.extract(url)
         if content.platform != "website":
-            source_text = " ".join(
-                [
-                    content.meta_description,
-                    *content.paragraphs,
-                    *content.service_descriptions,
-                ]
-            ).strip()
+            if (
+                content.platform == "youtube"
+                and content.content_type == "video"
+                and content.source == "youtube_oembed"
+            ):
+                source_text = " ".join(
+                    [content.title, content.metadata.get("author_name", "")]
+                ).strip()
+            else:
+                source_text = " ".join(
+                    [
+                        content.meta_description,
+                        *content.paragraphs,
+                        *content.service_descriptions,
+                    ]
+                ).strip()
             if len(source_text) < 20:
                 limitation = " ".join(content.limitations)
                 detail = (
@@ -83,7 +95,7 @@ class AnalysisService:
                     if not limitation
                     else f"No usable public content was retrieved from {content.platform}. {limitation}"
                 )
-                raise EmptyWebsiteContentError(detail)
+                raise EmptyWebsiteContentError(detail, content=content)
         prompt = build_analysis_prompt(content, self.settings.max_content_chars)
         cache_key = hashlib.sha256(
             f"{self.settings.llm_provider}:{self.settings.llm_model}:{url}:{prompt}".encode()
@@ -97,6 +109,7 @@ class AnalysisService:
                 )
 
         analysis, usage = await self.llm_service.analyze(prompt)
+        analysis = _qualify_limited_social_analysis(content, analysis)
         name, category, summary = _brand_details(content, analysis.competitor_analysis.industry)
         response = AnalysisResponse(
             website=url,
@@ -109,12 +122,8 @@ class AnalysisService:
                 output_tokens=usage["output_tokens"],
                 total_tokens=usage["total_tokens"],
             ),
-            extraction=ExtractionInfo(
-                platform=content.platform,
-                content_type=content.content_type,
-                extraction_status=content.extraction_status,
-                source=content.source,
-                limitations=content.limitations,
+            extraction=build_extraction_info(
+                content, self.settings.max_content_chars
             ),
         )
         async with self._cache_lock:
@@ -143,6 +152,105 @@ class AnalysisService:
             self._cache.popitem(last=False)
 
 
+def build_extraction_info(
+    content: WebsiteContent,
+    max_content_chars: int = 18_000,
+    *,
+    extraction_status: str | None = None,
+    error_detail: str | None = None,
+) -> ExtractionInfo:
+    """Build bounded response evidence without presenting metadata as page text."""
+    remaining = max(0, max_content_chars)
+
+    def clipped_items(values: list[str], max_items: int) -> list[str]:
+        nonlocal remaining
+        clipped: list[str] = []
+        for value in values[:max_items]:
+            if remaining <= 0:
+                break
+            item = value[:remaining]
+            if item:
+                clipped.append(item)
+                remaining -= len(item)
+        return clipped
+
+    limitations = list(content.limitations)
+    if error_detail and error_detail not in limitations:
+        limitations.append(error_detail)
+
+    return ExtractionInfo(
+        platform=content.platform,
+        content_type=content.content_type,
+        extraction_status=extraction_status or content.extraction_status,
+        source=content.source,
+        limitations=limitations,
+        content=ExtractedContent(
+            title=content.title[:500],
+            meta_description=content.meta_description[:1000],
+            headings=clipped_items(content.headings, 30),
+            paragraphs=clipped_items(content.paragraphs, 100),
+            service_descriptions=clipped_items(content.service_descriptions, 20),
+            metadata={
+                key[:100]: value[:500]
+                for key, value in list(content.metadata.items())[:30]
+            },
+        ),
+    )
+
+
+def _qualify_limited_social_analysis(
+    content: WebsiteContent, analysis: BusinessAnalysis
+) -> BusinessAnalysis:
+    """Remove unsupported profile facts from limited social and metadata-only analyses."""
+    metadata_only_video = (
+        content.platform == "youtube"
+        and content.content_type == "video"
+        and content.source == "youtube_oembed"
+    )
+    public_post = content.content_type == "public_post"
+    limited_profile = (
+        content.platform in {"instagram", "facebook", "x"}
+        and content.extraction_status == "limited"
+    )
+    if not (metadata_only_video or public_post or limited_profile):
+        return analysis
+
+    if metadata_only_video:
+        scope = "Only YouTube oEmbed title and uploader metadata was retrieved; the video itself was not reviewed."
+        opportunity = "Provide a transcript or written video description for content-level analysis."
+        limitation = "Industry, audience, services, and competitors cannot be verified from title/uploader metadata alone."
+    elif content.platform == "x" and public_post:
+        scope = "Analysis is limited to the extracted public post; profile details were not retrieved."
+        opportunity = "Provide accessible public profile information for profile-level analysis."
+        limitation = "No profile bio, account statistics, or independent competitor research was retrieved."
+    else:
+        scope = f"Public {content.platform} content was limited; profile facts cannot be verified from the retrieved source."
+        opportunity = "Provide accessible public profile details for deeper analysis."
+        limitation = "Industry, audience, profile details, and competitor facts are not verified."
+
+    competitor_analysis = analysis.competitor_analysis.model_copy(
+        update={
+            "brand_overview": scope,
+            "industry": "Unknown",
+            "competitors": [],
+            "brand_strengths": [],
+            "opportunities": [opportunity],
+            "research_limitations": limitation,
+        }
+    )
+    recommended_services = [
+        service.model_copy(update={"source_status": "recommended"})
+        for service in analysis.top_services
+    ]
+    return analysis.model_copy(
+        update={
+            "competitor_analysis": competitor_analysis,
+            "target_audience": TargetAudience(),
+            "top_services": recommended_services,
+        }
+    )
+
+
 def _brand_details(content: WebsiteContent, industry: str) -> tuple[str, str, str]:
     """Build conservative response-level brand details from page evidence."""
     username = content.metadata.get("username", "").strip()
@@ -161,12 +269,24 @@ def _brand_details(content: WebsiteContent, industry: str) -> tuple[str, str, st
         from urllib.parse import urlsplit
 
         name = urlsplit(content.url).hostname or "Unknown brand"
-    if content.platform in {"instagram", "facebook", "x", "youtube"}:
+    if content.platform == "youtube" and content.content_type == "video":
+        author = content.metadata.get("author_name", "")
+        summary = f"YouTube video title: {page_title}."
+        if author:
+            summary += f" Uploader: {author}."
+        summary += " Video content and transcript were not retrieved."
+    elif content.platform == "x" and content.content_type == "public_post":
+        summary = meta_description or "The public post text was not available."
+    elif content.platform in {"instagram", "facebook", "x", "youtube"}:
         summary = meta_description or (
-            f"Public {content.platform.title()} profile for {name}; detailed public content was not available."
+            f"Public {content.platform.title()} content for {name}; detailed public content was not available."
             if content.extraction_status == "limited"
             else (headings[0] if headings else f"Public {content.platform.title()} metadata")
         )
     else:
-        summary = meta_description or (headings[0] if headings else "Business details inferred from website content.")
+        summary = meta_description or (
+            content.paragraphs[0]
+            if content.paragraphs
+            else (headings[0] if headings else "No descriptive text was retrieved.")
+        )
     return name[:160], industry or "Not clearly identified", summary[:500]

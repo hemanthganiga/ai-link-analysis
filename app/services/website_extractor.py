@@ -67,6 +67,12 @@ class WebsiteHTTPError(WebsiteFetchError):
 class EmptyWebsiteContentError(WebsiteFetchError):
     """Raised when the page contains no useful business text."""
 
+    def __init__(
+        self, message: str, content: WebsiteContent | None = None
+    ) -> None:
+        super().__init__(message)
+        self.content = content
+
 
 @dataclass(frozen=True)
 class WebsiteContent:
@@ -336,12 +342,23 @@ class WebsiteExtractor:
                     try:
                         page = await self._request_public(client, url, headers)
                         if page.status_code >= 400:
-                            if page.status_code >= 500:
-                                raise WebsiteHTTPError(
-                                    f"YouTube returned HTTP {page.status_code} while fetching public metadata."
-                                )
-                            raise EmptyWebsiteContentError(
+                            detail = (
                                 f"YouTube returned HTTP {page.status_code}; public metadata is inaccessible."
+                            )
+                            if page.status_code >= 500:
+                                raise WebsiteHTTPError(detail)
+                            raise EmptyWebsiteContentError(
+                                detail,
+                                content=WebsiteContent(
+                                    url=url,
+                                    title="",
+                                    meta_description="",
+                                    platform="youtube",
+                                    content_type=_social_content_type(url, platform),
+                                    extraction_status="limited",
+                                    source="public_html",
+                                    limitations=[detail],
+                                ),
                             )
                         soup = BeautifulSoup(page.content, "html.parser")
                         public_metadata = _social_metadata(soup)
@@ -361,31 +378,54 @@ class WebsiteExtractor:
             title = _clean_text(str(data.get("title", ""))) or _clean_text(title)
             author = _clean_text(str(data.get("author_name", "")))
             if not title:
-                raise EmptyWebsiteContentError("YouTube returned no usable public metadata.")
+                detail = "YouTube returned no usable public metadata."
+                raise EmptyWebsiteContentError(
+                    detail,
+                    content=WebsiteContent(
+                        url=url,
+                        title="",
+                        meta_description="",
+                        platform="youtube",
+                        content_type=_social_content_type(url, platform),
+                        extraction_status="limited",
+                        source=source,
+                        limitations=[detail],
+                    ),
+                )
             content_type = _social_content_type(url, platform)
             limitations: list[str] = []
-            if content_type in {"profile", "channel_or_video"}:
+            if source == "youtube_oembed" and content_type == "video":
+                limitations.extend(
+                    [
+                        "Only public oEmbed metadata was retrieved; the video content and transcript were not retrieved.",
+                        "Engagement statistics were not retrieved.",
+                    ]
+                )
+            elif content_type in {"profile", "channel_or_video"}:
                 limitations.append("Channel statistics, recent posts, and transcripts may require another authorized source.")
             elif content_type == "video":
-                limitations.append("Transcript availability and engagement statistics are not verified.")
+                limitations.append("Transcript and engagement data were not retrieved from public HTML.")
             else:
                 limitations.append("This is a YouTube landing page; channel-specific details were not retrieved.")
+            metadata = {
+                key: value
+                for key, value in {
+                    "author_name": author,
+                    "thumbnail_url": str(data.get("thumbnail_url", "")),
+                }.items()
+                if value
+            }
             return WebsiteContent(
                 url=url,
                 title=title,
                 meta_description=_clean_text(description)[:1000],
-                headings=[title, author] if author else [title],
-                paragraphs=[f"Channel or uploader: {author}"] if author else [],
+                headings=[title],
                 platform="youtube",
                 content_type=content_type,
-                extraction_status=(
-                    "success"
-                    if description or (data and content_type == "video")
-                    else "limited"
-                ),
+                extraction_status="success" if source == "public_html" and description else "limited",
                 source=source,
                 limitations=limitations,
-                metadata={"author_name": author, "thumbnail_url": str(data.get("thumbnail_url", ""))},
+                metadata=metadata,
             )
 
         async with httpx.AsyncClient(transport=transport, timeout=timeout, trust_env=False) as client:
@@ -402,34 +442,8 @@ class WebsiteExtractor:
             raise WebsiteHTTPError(
                 f"The {platform} public page returned HTTP {response.status_code}."
             )
-        if response.status_code in {403, 429}:
-            username = _platform_username(url, platform)
-            return WebsiteContent(
-                url=url,
-                title=f"@{username}" if username and platform in {"instagram", "x"} else platform.title(),
-                meta_description="",
-                headings=[f"@{username}" if username and platform in {"instagram", "x"} else platform.title()],
-                platform=platform,
-                content_type=_social_content_type(url, platform),
-                extraction_status="limited",
-                source="public_html",
-                limitations=[f"The {platform} public page returned HTTP {response.status_code}; automated access was denied or rate limited."],
-                metadata={"username": username},
-            )
         if response.status_code >= 400:
-            username = _platform_username(url, platform)
-            return WebsiteContent(
-                url=url,
-                title=f"@{username}" if username and platform in {"instagram", "x"} else platform.title(),
-                meta_description="",
-                headings=[f"@{username}" if username and platform in {"instagram", "x"} else platform.title()],
-                platform=platform,
-                content_type=_social_content_type(url, platform),
-                extraction_status="limited",
-                source="public_html",
-                limitations=[f"The {platform} public page returned HTTP {response.status_code}; the requested content may be private or inaccessible."],
-                metadata={"username": username},
-            )
+            return _limited_social_content(url, platform, response.status_code)
 
         content_type = response.headers.get("content-type", "").lower()
         if content_type and "text/html" not in content_type:
@@ -469,7 +483,10 @@ class WebsiteExtractor:
         elif platform == "facebook":
             limitations.append("Facebook may require login or may omit public profile and post details.")
         elif platform == "x":
-            limitations.append("X may block automated requests or omit post and profile details.")
+            if _social_content_type(url, platform) == "public_post":
+                limitations.append("Only this post's extracted public text and metadata are available; profile bio and account statistics were not retrieved.")
+            else:
+                limitations.append("X may block automated requests or omit post and profile details.")
 
         if login_wall:
             limitations.insert(0, f"The {platform} public page appears to contain a login or access restriction.")
@@ -485,7 +502,9 @@ class WebsiteExtractor:
 
         fallback_title = title or (username and f"@{username}" if platform in {"instagram", "x"} else username)
         fallback_title = fallback_title or platform.title()
-        metadata["username"] = username
+        if username:
+            metadata["username"] = username
+            metadata["username_source"] = "submitted_url_path"
         return WebsiteContent(
             url=url,
             title=_clean_text(fallback_title)[:500],
@@ -588,9 +607,14 @@ class WebsiteExtractor:
             ]
         ).strip()
         if not evidence:
-            raise EmptyWebsiteContentError("Website contained no readable business content.")
+            raise EmptyWebsiteContentError(
+                "Website contained no readable business content.", content=result
+            )
         if len(evidence) < 20:
-            raise EmptyWebsiteContentError("Website contained too little useful content to analyze.")
+            raise EmptyWebsiteContentError(
+                "Website contained too little useful content to analyze.",
+                content=result,
+            )
         return result
 
 
@@ -619,6 +643,46 @@ def _social_content_type(url: str, platform: str) -> str:
             return "homepage"
         return "public_post" if parts[0] in {"posts", "videos", "watch", "photo"} else "profile"
     return "page"
+
+
+def _limited_social_content(
+    url: str, platform: str, status_code: int
+) -> WebsiteContent:
+    """Represent an upstream denial without labeling URL-derived values as content."""
+    if platform == "facebook" and status_code == 400:
+        limitation = (
+            "Facebook returned HTTP 400; public HTML content was not accessible."
+        )
+    elif status_code in {403, 429}:
+        limitation = (
+            f"{platform} returned HTTP {status_code}; automated access was denied or rate limited."
+        )
+    elif status_code in {404, 410}:
+        limitation = (
+            f"{platform} returned HTTP {status_code}; the requested public content was not found or is unavailable."
+        )
+    else:
+        limitation = (
+            f"{platform} returned HTTP {status_code}; the requested public content was inaccessible."
+        )
+
+    username = _platform_username(url, platform)
+    metadata = (
+        {"requested_handle": username, "requested_handle_source": "submitted_url_path"}
+        if username
+        else {}
+    )
+    return WebsiteContent(
+        url=url,
+        title="",
+        meta_description="",
+        platform=platform,
+        content_type=_social_content_type(url, platform),
+        extraction_status="limited",
+        source="public_html",
+        limitations=[limitation],
+        metadata=metadata,
+    )
 
 
 def _detect_platform(url: str) -> str:
